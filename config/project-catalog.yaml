@@ -1,0 +1,120 @@
+version: 1
+kind: quality-hub-project-catalog
+updatedAt: "2026-08-04"
+owner: local-platform
+projects:
+  - id: 11111111-1111-4111-8111-111111111111
+    slug: chedoparti-react-app
+    displayName: Chedoparti React App
+    description: Chedoparti platform: booking, backend, gateway and SaaS modules.
+    owner: Martiniano
+    team: local-engineering
+    repositoryPath: chedoparti-react-app
+    defaultBranch: main
+    sonarProjectKey: chedoparti-react-app
+    criticality: high
+    status: ACTIVE
+    components:
+      - name: application
+        type: application
+        path: .
+        runtime: local-docker
+    environments:
+      - name: local
+        provider: local
+        protected: false
+        baseUrl: ""
+        healthUrl: ""
+        metricsUrl: ""
+  - id: 22222222-2222-4222-8222-222222222222
+    slug: maria-belen-labarque-ceramic
+    displayName: Maria Belen Labarque Ceramic
+    description: DiTerra ceramic ecommerce and workshops platform.
+    owner: Martiniano
+    team: local-engineering
+    repositoryPath: maria-belen-labarque-ceramic
+    defaultBranch: main
+    sonarProjectKey: maria-belen-labarque-ceramic
+    criticality: medium
+    status: ACTIVE
+    components:
+      - name: application
+        type: application
+        path: .
+        runtime: local-docker
+    environments:
+      - name: local
+        provider: local
+        protected: false
+        baseUrl: ""
+        healthUrl: ""
+        metricsUrl: ""
+  - id: 33333333-3333-4333-8333-333333333333
+    slug: sistema-dietetica
+    displayName: Sistema Dietetica
+    description: Dietetica management system.
+    owner: Martiniano
+    team: local-engineering
+    repositoryPath: sistema_dietetica
+    defaultBranch: main
+    sonarProjectKey: sistema-dietetica
+    criticality: medium
+    status: ACTIVE
+    components:
+      - name: application
+        type: application
+        path: .
+        runtime: local-docker
+    environments:
+      - name: local
+        provider: local
+        protected: false
+        baseUrl: ""
+        healthUrl: ""
+        metricsUrl: ""
+  - id: 44444444-4444-4444-8444-444444444444
+    slug: giftfinder-proyect
+    displayName: Giftfinder Proyect
+    description: Giftfinder product and recommendation platform.
+    owner: Martiniano
+    team: local-engineering
+    repositoryPath: giftfinder-proyect
+    defaultBranch: main
+    sonarProjectKey: giftfinder-proyect
+    criticality: medium
+    status: ACTIVE
+    components:
+      - name: application
+        type: application
+        path: .
+        runtime: local-docker
+    environments:
+      - name: local
+        provider: local
+        protected: false
+        baseUrl: ""
+        healthUrl: ""
+        metricsUrl: ""
+  - id: 55555555-5555-4555-8555-555555555555
+    slug: panorama-mercados
+    displayName: Panorama Mercados
+    description: Market analysis and financial panorama project.
+    owner: Martiniano
+    team: local-engineering
+    repositoryPath: panorama-mercados
+    defaultBranch: main
+    sonarProjectKey: panorama-mercados
+    criticality: medium
+    status: ACTIVE
+    components:
+      - name: application
+        type: application
+        path: .
+        runtime: local-docker
+    environments:
+      - name: local
+        provider: local
+        protected: false
+        baseUrl: ""
+        healthUrl: ""
+        metricsUrl: ""

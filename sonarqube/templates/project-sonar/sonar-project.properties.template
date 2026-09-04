@@ -1,0 +1,15 @@
+sonar.projectKey=__PROJECT_KEY__
+sonar.projectName=__PROJECT_NAME__
+sonar.sourceEncoding=UTF-8
+
+sonar.sources=__SONAR_SOURCES__
+sonar.tests=__SONAR_TESTS__
+
+sonar.test.inclusions=**/*.test.*,**/*.spec.*,**/tests/**,**/__tests__/**
+
+sonar.exclusions=**/node_modules/**,**/dist/**,**/build/**,**/.gradle/**,**/.idea/**,**/.vscode/**,**/coverage/**,**/target/**,**/out/**,**/.next/**,**/ios/**,**/android/**,**/Pods/**,**/vendor/**,**/generated/**,**/.expo/**,**/.turbo/**,**/.cache/**,**/*.min.js,**/*.map,**/*.lock,**/package-lock.json,**/yarn.lock,**/pnpm-lock.yaml
+sonar.coverage.exclusions=**/*.test.*,**/*.spec.*,**/tests/**,**/__tests__/**,**/generated/**,**/*.config.*,**/config/**
+
+# Optional, if coverage exists.
+# sonar.javascript.lcov.reportPaths=coverage/lcov.info
+# sonar.coverage.jacoco.xmlReportPaths=**/build/reports/jacoco/test/jacocoTestReport.xml,**/target/site/jacoco/jacoco.xml

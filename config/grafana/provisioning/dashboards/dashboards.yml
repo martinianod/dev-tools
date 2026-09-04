@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: Quality Hub
+    orgId: 1
+    folder: Quality Hub
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

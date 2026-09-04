@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Engineering Control Center</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23111827'/%3E%3Ctext x='32' y='39' text-anchor='middle' font-size='22' font-family='Arial' font-weight='700' fill='%23f8fafc'%3EEC%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">Saltar al workspace</a>
+
+    <div class="app-frame">
+      <aside class="sidebar" aria-label="Navegacion del producto">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">EC</span>
+          <span>
+            <strong>Engineering Center</strong>
+            <small>control local</small>
+          </span>
+        </div>
+        <nav class="side-nav">
+          <a href="#workspace" class="active">Workspace</a>
+          <a href="#project-detail">Proyecto</a>
+          <a href="#improvements">Mejoras IA</a>
+          <a href="#configuration">Configuracion</a>
+          <a href="http://localhost:9000/projects" target="_blank" rel="noreferrer">SonarQube</a>
+          <a href="http://localhost:18082" target="_blank" rel="noreferrer">Jenkins</a>
+          <a href="http://localhost:13000" target="_blank" rel="noreferrer">Grafana</a>
+          <a href="http://localhost:19090" target="_blank" rel="noreferrer">Prometheus</a>
+        </nav>
+        <div class="sidebar-card">
+          <span class="label">Estado plataforma</span>
+          <strong id="platformSidebarState">Cargando</strong>
+          <p id="platformSidebarMeta" class="muted">Verificando servicios locales.</p>
+        </div>
+      </aside>
+
+      <main id="workspace" class="workspace-shell">
+        <header class="workspace-header" aria-label="Header contextual">
+          <div>
+            <p class="eyebrow">Workspace operativo</p>
+            <h1>Panel local</h1>
+          </div>
+          <div class="header-actions">
+            <label class="search-box">
+              <span>Buscar</span>
+              <input id="globalSearch" type="search" placeholder="Proyecto, stack, estado..." autocomplete="off" />
+            </label>
+            <label class="environment-select">
+              <span>Entorno</span>
+              <select id="environmentSelector">
+                <option value="local">local</option>
+              </select>
+            </label>
+            <div class="bulk-actions" aria-label="Acciones bulk de runtime local">
+              <button class="button primary" id="startAllRuntimeButton" type="button">Start todos</button>
+              <button class="button secondary" id="rebuildAllRuntimeButton" type="button">Rebuild changed components</button>
+              <button class="button secondary" id="stopAllRuntimeButton" type="button">Stop todos</button>
+            </div>
+            <button class="button secondary" id="commandMenuButton" type="button">Comandos</button>
+            <button class="button primary" id="openRegisterButton" type="button">Agregar proyecto</button>
+          </div>
+        </header>
+
+        <section class="overview-grid" aria-label="Resumen general">
+          <article class="summary-card">
+            <span class="label">Proyectos</span>
+            <strong id="summaryProjects">0</strong>
+            <p class="muted">registrados</p>
+          </article>
+          <article class="summary-card">
+            <span class="label">Saludables</span>
+            <strong id="summaryHealthy">0</strong>
+            <p class="muted">sin riesgos bloqueantes</p>
+          </article>
+          <article class="summary-card">
+            <span class="label">Advertencias</span>
+            <strong id="summaryWarnings">0</strong>
+            <p class="muted">requieren configuracion o datos</p>
+          </article>
+          <article class="summary-card">
+            <span class="label">Criticos</span>
+            <strong id="summaryCritical">0</strong>
+            <p class="muted">fallos o servicios caidos</p>
+          </article>
+          <article class="summary-card">
+            <span class="label">Analisis pendientes</span>
+            <strong id="summaryPending">0</strong>
+            <p class="muted">sin snapshot Sonar importado</p>
+          </article>
+          <article class="summary-card">
+            <span class="label">Servicios UP</span>
+            <strong id="summaryServices">0/0</strong>
+            <p class="muted">plataforma local</p>
+          </article>
+        </section>
+
+        <section id="localAgentPanel" class="agent-panel" aria-live="polite"></section>
+
+        <section class="work-grid">
+          <section class="project-catalog" aria-labelledby="catalogTitle">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Catalogo</p>
+                <h2 id="catalogTitle">Proyectos registrados</h2>
+              </div>
+              <div class="toolbar">
+                <div class="segmented" role="tablist" aria-label="Filtro de estado">
+                  <button type="button" class="active" data-filter="all"><span class="filter-dot neutral"></span>Todos</button>
+                  <button type="button" data-filter="healthy"><span class="filter-dot ok"></span>Healthy</button>
+                  <button type="button" data-filter="warning"><span class="filter-dot warn"></span>Warning</button>
+                  <button type="button" data-filter="critical"><span class="filter-dot error"></span>Critical</button>
+                  <button type="button" data-filter="pending"><span class="filter-dot info"></span>Pending</button>
+                </div>
+                <button class="button secondary" id="refreshButton" type="button">Actualizar</button>
+              </div>
+            </div>
+            <div id="projectList" class="project-list" aria-live="polite"></div>
+          </section>
+
+          <aside class="action-panel" aria-labelledby="nextActionsTitle">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Siguiente accion</p>
+                <h2 id="nextActionsTitle">Prioridades</h2>
+              </div>
+            </div>
+            <div id="nextActionsList" class="action-list"></div>
+          </aside>
+        </section>
+
+        <section class="improvements" id="improvements" aria-labelledby="improvementsTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Deteccion asistida</p>
+              <h2 id="improvementsTitle">Mejoras IA</h2>
+              <p class="muted">Hallazgos accionables del hub y prompt maestro para continuar correcciones con IA.</p>
+            </div>
+            <div class="toolbar improvement-toolbar">
+              <label>
+                Alcance
+                <select id="improvementScope">
+                  <option value="all">Todos los proyectos</option>
+                  <option value="project">Proyecto especifico</option>
+                </select>
+              </label>
+              <label>
+                Proyecto
+                <select id="improvementProjectSelector"></select>
+              </label>
+              <label>
+                Severidad
+                <select id="improvementSeverityFilter">
+                  <option value="all">Todas</option>
+                  <option value="critical">Critical</option>
+                  <option value="warning">Warning</option>
+                  <option value="info">Info</option>
+                </select>
+              </label>
+              <label>
+                Categoria
+                <select id="improvementCategoryFilter">
+                  <option value="all">Todas</option>
+                </select>
+              </label>
+              <button class="button secondary" id="regenerateImprovementPrompt" type="button">Regenerar</button>
+            </div>
+          </div>
+
+          <div class="improvement-summary" aria-label="Resumen de hallazgos">
+            <article class="summary-card">
+              <span class="label">Critical</span>
+              <strong id="improvementCritical">0</strong>
+              <p class="muted">bloqueantes</p>
+            </article>
+            <article class="summary-card">
+              <span class="label">Warning</span>
+              <strong id="improvementWarning">0</strong>
+              <p class="muted">requieren atencion</p>
+            </article>
+            <article class="summary-card">
+              <span class="label">Info</span>
+              <strong id="improvementInfo">0</strong>
+              <p class="muted">mejoras o setup</p>
+            </article>
+            <article class="summary-card">
+              <span class="label">Categorias</span>
+              <strong id="improvementCategories">0</strong>
+              <p class="muted" id="improvementGeneratedAt">Sin reporte</p>
+            </article>
+          </div>
+
+          <div class="improvement-layout">
+            <section class="improvement-findings" aria-labelledby="improvementFindingsTitle">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Hallazgos</p>
+                  <h3 id="improvementFindingsTitle">Que mejorar primero</h3>
+                </div>
+              </div>
+              <div id="improvementList" class="improvement-list" aria-live="polite"></div>
+            </section>
+
+            <section class="improvement-prompt-panel" aria-labelledby="improvementPromptTitle">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Prompt maestro</p>
+                  <h3 id="improvementPromptTitle">Instrucciones para IA</h3>
+                </div>
+                <div class="toolbar">
+                  <button class="button secondary" id="copyImprovementPrompt" type="button">Copiar prompt</button>
+                  <button class="button secondary" id="downloadImprovementPrompt" type="button">Descargar .md</button>
+                </div>
+              </div>
+              <textarea id="improvementPrompt" class="prompt-output" rows="24" readonly placeholder="Regenera el reporte para ver el prompt maestro."></textarea>
+            </section>
+          </div>
+        </section>
+
+        <section class="project-detail" id="project-detail" hidden aria-labelledby="dashboardTitle" aria-live="polite">
+          <div class="dashboard-header">
+            <div>
+              <p class="eyebrow" id="dashboardStack">Proyecto</p>
+              <h2 id="dashboardTitle"></h2>
+              <p id="dashboardMeta" class="muted"></p>
+            </div>
+            <div class="toolbar">
+              <button class="button primary" data-runtime-action="start" type="button">Start</button>
+              <button class="button secondary" data-runtime-action="rebuild-changed" type="button">Rebuild changed components</button>
+              <button class="button secondary" data-runtime-action="stop" type="button">Stop</button>
+              <button class="button secondary" data-runtime-action="restart" type="button">Restart</button>
+              <button class="button primary" data-action="full" type="button">Ejecutar analisis</button>
+              <button class="button secondary" data-action="doctor" type="button">Doctor</button>
+              <button class="icon-button" id="closeProjectDetail" type="button" aria-label="Volver al listado">x</button>
+            </div>
+          </div>
+
+          <div class="project-nav" role="tablist" aria-label="Navegacion del proyecto">
+            <button role="tab" aria-selected="true" data-tab="overview">Resumen</button>
+            <button role="tab" aria-selected="false" data-tab="environment">Gestion de entorno</button>
+            <button role="tab" aria-selected="false" data-tab="quality">Calidad y observabilidad</button>
+            <button role="tab" aria-selected="false" data-tab="terminal">Terminal / logs</button>
+            <button role="tab" aria-selected="false" data-tab="executions">Ejecuciones</button>
+            <button role="tab" aria-selected="false" data-tab="docs">Documentacion viva</button>
+            <button role="tab" aria-selected="false" data-tab="configuration">Configuracion</button>
+          </div>
+
+          <div id="tabContent" class="tab-content"></div>
+        </section>
+
+        <section class="configuration" id="configuration" aria-labelledby="configurationTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Configuracion segura</p>
+              <h2 id="configurationTitle">Reglas operativas</h2>
+            </div>
+          </div>
+          <div class="config-grid">
+            <article>
+              <strong>Workspace permitido</strong>
+              <span id="projectsRootLabel">/workspace/projects</span>
+            </article>
+            <article>
+              <strong>Templates aprobados</strong>
+              <span>Las ejecuciones salen de comandos detectados por stack, no de input arbitrario.</span>
+            </article>
+            <article>
+              <strong>Secretos fuera del navegador</strong>
+              <span>Sonar usa `SONAR_TOKEN` en el backend o en la shell local, nunca en la UI.</span>
+            </article>
+            <article>
+              <strong>Estados explicitos</strong>
+              <span>Sin datos, pendiente o no configurado no se muestran como exito.</span>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="projectDialog" class="dialog onboarding-dialog">
+      <form id="projectForm" method="dialog">
+        <div class="dialog-header">
+          <div>
+            <p class="eyebrow">Onboarding progresivo</p>
+            <h2>Agregar proyecto</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="Cerrar">x</button>
+        </div>
+        <div class="onboarding-layout">
+          <div class="form-grid">
+            <label>
+              Carpeta relativa a PROJECTS_ROOT
+              <input name="repositoryPath" placeholder="mi-proyecto" required />
+            </label>
+            <label>
+              Nombre
+              <input name="displayName" placeholder="Mi proyecto" required />
+            </label>
+            <label>
+              Slug
+              <input name="slug" placeholder="mi-proyecto" />
+            </label>
+            <label>
+              Sonar project key
+              <input name="sonarProjectKey" placeholder="mi-proyecto" />
+            </label>
+            <label class="span-2">
+              Descripcion
+              <textarea name="description" rows="3"></textarea>
+            </label>
+          </div>
+          <div>
+            <h3>Checklist de configuracion</h3>
+            <div id="setupChecklist" class="setup-checklist"></div>
+          </div>
+        </div>
+        <output id="discoverPreview" class="preview-output"></output>
+        <div class="toolbar end">
+          <button class="button secondary" id="discoverButton" type="button">Detectar stack</button>
+          <button class="button primary" value="default">Guardar proyecto</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="commandDialog" class="dialog command-dialog">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Command palette</p>
+          <h2>Acciones rapidas</h2>
+        </div>
+        <button class="icon-button" id="closeCommandDialog" type="button" aria-label="Cerrar">x</button>
+      </div>
+      <input id="commandSearch" type="search" placeholder="Buscar proyecto o accion..." autocomplete="off" />
+      <div id="commandList" class="command-palette-list"></div>
+    </dialog>
+
+    <aside id="jobDrawer" class="job-drawer" hidden aria-live="polite">
+      <div class="drawer-header">
+        <div>
+          <p class="eyebrow">Execution job</p>
+          <h2 id="jobTitle">Job</h2>
+        </div>
+        <button class="icon-button" id="closeJobDrawer" type="button" aria-label="Cerrar">x</button>
+      </div>
+      <div id="jobStages" class="stage-list"></div>
+      <div id="jobSummary" class="job-summary"></div>
+      <details class="raw-log-details">
+        <summary>Expandir log completo</summary>
+        <pre id="jobLogs" class="logs"></pre>
+      </details>
+    </aside>
+
+    <div id="toast" class="toast" hidden></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

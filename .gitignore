@@ -1,0 +1,25 @@
+# Local environment / secrets
+.env
+**/.env
+
+# Keep templates
+!.env.example
+!**/.env.example
+
+# Runtime state
+data/state.json
+data/jobs/
+data/tmp/
+
+# Dependencies
+node_modules/
+
+# Generated / local tooling
+.playwright-mcp/
+
+# OS/editor noise
+.DS_Store
+**/.DS_Store
+
+# Logs
+*.log

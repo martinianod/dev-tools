@@ -1,0 +1,50 @@
+groups:
+  - name: quality-hub-platform
+    rules:
+      - alert: QualityHubServiceDown
+        expr: up{job="control-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          project: platform
+          environment: local
+        annotations:
+          summary: Quality Hub control API is down
+          description: Prometheus cannot scrape the local control API.
+          runbook_url: http://localhost:18000/#configuration
+
+      - alert: QualityHubTargetMissing
+        expr: absent(up{job="control-api"})
+        for: 2m
+        labels:
+          severity: warning
+          project: platform
+          environment: local
+        annotations:
+          summary: Quality Hub control API target is absent
+          description: The control-api target is missing from Prometheus.
+          runbook_url: http://localhost:18000/#configuration
+
+      - alert: LocalEndpointProbeFailed
+        expr: probe_success{job="blackbox-http"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          project: platform
+          environment: local
+        annotations:
+          summary: Blackbox probe failed
+          description: "HTTP probe failed for {{ $labels.instance }}."
+          runbook_url: http://localhost:18000/#configuration
+
+      - alert: ProjectTelemetryTargetsMissing
+        expr: absent(up{project!="platform"})
+        for: 5m
+        labels:
+          severity: info
+          project: platform
+          environment: local
+        annotations:
+          summary: No project telemetry targets are configured
+          description: Prometheus is running, but no non-platform project target is currently scraped with a project label.
+          runbook_url: http://localhost:18000/#observability

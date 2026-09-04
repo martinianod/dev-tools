@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SONAR_HOST_URL="${SONAR_HOST_URL:-http://localhost:9000}"
+SONAR_JAVASCRIPT_NODE_MAXSPACE="${SONAR_JAVASCRIPT_NODE_MAXSPACE:-4096}"
+SONAR_SCANNER_OPTS="${SONAR_SCANNER_OPTS:--Xmx2048m}"
+
+if [ -z "${SONAR_TOKEN:-}" ]; then
+  echo "ERROR: SONAR_TOKEN is required."
+  echo "Create a token in SonarQube UI: My Account -> Security -> Generate Tokens."
+  echo "Then run: export SONAR_TOKEN=<token>"
+  exit 1
+fi
+
+if ! command -v sonar-scanner >/dev/null 2>&1; then
+  echo "ERROR: sonar-scanner is not installed or not available in PATH."
+  echo "Install it locally, or run sonarsource/sonar-scanner-cli with host.docker.internal on macOS."
+  exit 1
+fi
+
+export SONAR_TOKEN
+export SONAR_SCANNER_OPTS
+
+echo "Running SonarQube analysis for $(basename "$ROOT_DIR")"
+echo "SONAR_HOST_URL=$SONAR_HOST_URL"
+echo "SONAR_JAVASCRIPT_NODE_MAXSPACE=$SONAR_JAVASCRIPT_NODE_MAXSPACE"
+
+sonar-scanner \
+  -Dsonar.host.url="$SONAR_HOST_URL" \
+  -Dsonar.javascript.node.maxspace="$SONAR_JAVASCRIPT_NODE_MAXSPACE"
+
+echo "Analysis submitted. Open: $SONAR_HOST_URL"

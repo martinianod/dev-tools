@@ -1,0 +1,55 @@
+FROM node:24.4.1-alpine3.22
+
+ARG SONAR_SCANNER_CLI_VERSION=8.0.1.6346
+ARG TARGETARCH
+
+RUN apk add --no-cache \
+      bash \
+      curl \
+      docker-cli \
+      docker-cli-compose \
+      git \
+      maven \
+      openjdk21-jdk \
+      python3 \
+      py3-pip \
+      unzip \
+    && scanner_arch="$TARGETARCH" \
+    && if [ -z "$scanner_arch" ]; then scanner_arch="$(uname -m)"; fi \
+    && if [ "$scanner_arch" = "amd64" ]; then scanner_arch="linux-x64"; fi \
+    && if [ "$scanner_arch" = "arm64" ]; then scanner_arch="linux-aarch64"; fi \
+    && if [ "$scanner_arch" = "x86_64" ]; then scanner_arch="linux-x64"; fi \
+    && if [ "$scanner_arch" = "aarch64" ]; then scanner_arch="linux-aarch64"; fi \
+    && curl --fail --show-error --location --retry 4 --retry-delay 3 --connect-timeout 20 --max-time 300 \
+      "https://repo1.maven.org/maven2/org/sonarsource/scanner/cli/sonar-scanner-cli/${SONAR_SCANNER_CLI_VERSION}/sonar-scanner-cli-${SONAR_SCANNER_CLI_VERSION}-${scanner_arch}.zip" \
+      -o /tmp/sonar-scanner.zip \
+    && unzip -q /tmp/sonar-scanner.zip -d /opt \
+    && mv "/opt/sonar-scanner-${SONAR_SCANNER_CLI_VERSION}-${scanner_arch}" /opt/sonar-scanner \
+    && sed -i 's/use_embedded_jre=true/use_embedded_jre=false/' /opt/sonar-scanner/bin/sonar-scanner \
+    && rm -rf /opt/sonar-scanner/jre \
+    && rm /tmp/sonar-scanner.zip
+
+WORKDIR /app
+
+COPY package.json ./
+COPY apps/control-api ./apps/control-api
+COPY apps/web ./apps/web
+COPY config/project-catalog.yaml ./config/project-catalog.yaml
+COPY README.md AGENTS.md PROMPT_MASTER_PLATFORM.md ./
+COPY docs ./docs
+COPY data ./data
+
+RUN mkdir -p /app/data/jobs && chown -R node:node /app
+
+USER node
+
+ENV NODE_ENV=production
+ENV HUB_API_HOST=0.0.0.0
+ENV HUB_API_PORT=18080
+ENV HUB_DATA_DIR=/app/data
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+ENV PATH="/opt/sonar-scanner/bin:${PATH}"
+
+EXPOSE 18080
+
+CMD ["node", "apps/control-api/server.mjs"]

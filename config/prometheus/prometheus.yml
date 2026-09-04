@@ -1,0 +1,61 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    platform: developer-quality-observability-hub
+    deployment_environment_name: local
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["prometheus:9090"]
+        labels:
+          project: platform
+          service_namespace: quality-hub
+          deployment_environment_name: local
+
+  - job_name: control-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["control-api:18080"]
+        labels:
+          project: platform
+          service_name: control-api
+          service_namespace: quality-hub
+          deployment_environment_name: local
+
+  - job_name: blackbox-http
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - http://control-api:18080/healthz
+        labels:
+          project: platform
+          service_name: control-api
+          deployment_environment_name: local
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+        labels:
+          project: platform
+          service_name: cadvisor
+          deployment_environment_name: local

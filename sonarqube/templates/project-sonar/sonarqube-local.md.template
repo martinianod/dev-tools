@@ -1,0 +1,22 @@
+# SonarQube local
+
+Project key: `__PROJECT_KEY__`
+
+## Scope
+
+- Sources: `__SONAR_SOURCES__`
+- Tests: `__SONAR_TESTS__`
+
+## Run
+
+```bash
+cd /Users/martiniano/Documents/dev-tools/sonarqube
+./scripts/up.sh
+
+cd /path/to/project
+export SONAR_HOST_URL=http://localhost:9000
+export SONAR_TOKEN=<token>
+./scripts/quality/sonar-scan-local.sh
+```
+
+Do not commit tokens. Generate them in SonarQube UI from `My Account -> Security -> Generate Tokens`.

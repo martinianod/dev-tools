@@ -1,0 +1,30 @@
+jenkins:
+  systemMessage: "Engineering Control Center local Jenkins. Jobs are managed from /var/jenkins_home/jobs/quality-hub-seed."
+  numExecutors: 2
+  mode: NORMAL
+  scmCheckoutRetryCount: 2
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "${JENKINS_ADMIN_ID:-admin}"
+          password: "${JENKINS_ADMIN_PASSWORD:-admin}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+  crumbIssuer:
+    standard:
+      excludeClientIPFromCrumb: true
+
+unclassified:
+  location:
+    url: "${JENKINS_URL:-http://localhost:18082/}"
+
+security:
+  queueItemAuthenticator:
+    authenticators:
+      - global:
+          strategy: triggeringUsersAuthorizationStrategy
+
+jobs:
+  - file: /var/jenkins_home/seed/jobs.groovy
