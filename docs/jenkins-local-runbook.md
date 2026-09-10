@@ -13,6 +13,23 @@ docker compose --profile core --profile ci up -d --build jenkins
 
 La primera construccion necesita acceso a Docker Hub para resolver `jenkins/jenkins` y descargar plugins. Si aparece `DeadlineExceeded` o `failed to resolve source metadata`, el problema esta antes de Jenkins: Docker Desktop no esta resolviendo/alcanzando el registry. Corregir DNS/proxy/red o precargar la imagen base antes de reintentar.
 
+## Baseline de version y reproducibilidad
+
+La imagen usa explicitamente Jenkins LTS `2.568.3` con Eclipse Temurin Java 21 (`jenkins/jenkins:2.568.3-lts-jdk21`). Esta LTS fue elegida porque es la linea estable vigente, incluye las correcciones de seguridad publicadas para Jenkins Core en septiembre de 2026 y satisface los requisitos minimos del conjunto actual de plugins. Jenkins `2.555.1` y posteriores requieren Java 21 o 25; este proyecto conserva Java 21 por ser una version LTS soportada y por mantener el cambio acotado al baseline del controller.
+
+Referencias: [Jenkins LTS changelog](https://www.jenkins.io/changelog-stable/), [Java support policy](https://www.jenkins.io/doc/book/platform-information/support-policy-java/) y [security advisories](https://www.jenkins.io/security/advisories/).
+
+`config/jenkins/plugins.txt` fija versiones exactas. Incluye los plugins funcionales directos, `authorize-project` requerido por `queueItemAuthenticator` en JCasC y pins transitivos de seguridad para evitar resolver revisiones vulnerables. El build usa Jenkins Plugin Installation Manager con `--latest=false`: las dependencias se resuelven desde esos artefactos exactos y sus minimos declarados, sin adoptar silenciosamente el ultimo plugin disponible.
+
+Para actualizar el baseline:
+
+1. Revisar la LTS y los advisories oficiales de Jenkins Core y plugins.
+2. Resolver el archivo pinneado con Plugin Installation Manager contra el core candidato usando `--latest=false` y security warnings habilitados.
+3. Actualizar core y plugins en el mismo cambio; no bajar plugins para forzar compatibilidad.
+4. Construir la imagen, confirmar `java -version`, arrancar con un `JENKINS_HOME` de prueba y validar JCasC, health, logs y hardening antes de promoverla.
+
+No reutilizar un volumen persistente como primera prueba de una actualizacion: validarla primero con un volumen aislado y conservar cualquier volumen anterior hasta completar el plan de rollback.
+
 UI:
 
 ```text
