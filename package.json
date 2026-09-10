@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node apps/control-api/server.mjs",
     "doctor": "bash scripts/doctor.sh",
-    "check": "node --check apps/control-api/server.mjs && node --check apps/web/app.js",
+    "check": "node --check apps/control-api/security.mjs && node --check apps/control-api/server.mjs && node --check apps/web/app.js",
     "test": "node --test tests/*.test.mjs"
   },
   "engines": {

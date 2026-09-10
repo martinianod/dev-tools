@@ -6,19 +6,36 @@ services:
       context: .
       dockerfile: Dockerfile.api
     profiles: ["core"]
-    # Local-only tradeoff: Docker Desktop exposes docker.sock with host-level
-    # permissions, so the API container must run as root to orchestrate projects.
-    user: "0:0"
+    mem_limit: ${HUB_API_MEM_LIMIT:-1024m}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     environment:
       HUB_API_HOST: 0.0.0.0
+      HUB_PUBLIC_BIND_ADDRESS: ${HUB_BIND_ADDRESS:-127.0.0.1}
       HUB_API_PORT: ${HUB_API_PORT:-18080}
+      HUB_WEB_PORT: ${HUB_WEB_PORT:-18000}
       HUB_DATA_DIR: ${HUB_DATA_DIR:-/app/data}
       HOME: /home/node
       MAVEN_CONFIG: /home/node/.m2
       GRADLE_USER_HOME: /home/node/.gradle
       NPM_CONFIG_CACHE: /home/node/.npm
       PROJECTS_ROOT: /workspace/projects
-      HOST_PROJECTS_ROOT: ${HOST_PROJECTS_ROOT:-/Users/martiniano/Documents}
+      HUB_AUTH_TOKEN: ${HUB_AUTH_TOKEN:-}
+      HUB_AUTH_ACTOR_ID: ${HUB_AUTH_ACTOR_ID:-}
+      HUB_AUTH_ROLE: ${HUB_AUTH_ROLE:-ADMIN}
+      HUB_ALLOWED_ORIGINS: ${HUB_ALLOWED_ORIGINS:-}
+      HUB_REQUEST_BODY_LIMIT_BYTES: ${HUB_REQUEST_BODY_LIMIT_BYTES:-1048576}
+      HUB_RATE_LIMIT_MAX_MUTATIONS: ${HUB_RATE_LIMIT_MAX_MUTATIONS:-60}
+      HUB_RATE_LIMIT_WINDOW_MS: ${HUB_RATE_LIMIT_WINDOW_MS:-60000}
+      HUB_UPSTREAM_TIMEOUT_MS: ${HUB_UPSTREAM_TIMEOUT_MS:-5000}
+      HUB_UPSTREAM_RESPONSE_LIMIT_BYTES: ${HUB_UPSTREAM_RESPONSE_LIMIT_BYTES:-1048576}
+      HUB_ALLOWED_UPSTREAM_ORIGINS: ${HUB_ALLOWED_UPSTREAM_ORIGINS:-}
+      HUB_PRIVILEGED_EXECUTION_ENABLED: "0"
       MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-1}
       JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-1800}
       SONAR_HOST_URL: ${SONAR_HOST_URL:-http://host.docker.internal:9000}
@@ -30,7 +47,7 @@ services:
       GRAFANA_URL: http://grafana:3000
       JENKINS_INTERNAL_URL: http://jenkins:8080
     ports:
-      - "${HUB_API_PORT:-18080}:18080"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${HUB_API_PORT:-18080}:18080"
     volumes:
       - ./apps/control-api:/app/apps/control-api:ro
       - ./apps/web:/app/apps/web:ro
@@ -39,14 +56,13 @@ services:
       - ./README.md:/app/README.md:ro
       - ./AGENTS.md:/app/AGENTS.md:ro
       - ./PROMPT_MASTER_PLATFORM.md:/app/PROMPT_MASTER_PLATFORM.md:ro
-      - ./docs:/app/docs:rw
+      - ./docs:/app/docs:ro
+      - ./docs/live:/app/docs/live:rw
       - hub_data:/app/data
       - hub_maven_cache:/home/node/.m2
       - hub_gradle_cache:/home/node/.gradle
       - hub_npm_cache:/home/node/.npm
-      - ${PROJECTS_ROOT:-/Users/martiniano/Documents}:/workspace/projects:rw
-      - ${HOST_PROJECTS_ROOT:-/Users/martiniano/Documents}:${HOST_PROJECTS_ROOT:-/Users/martiniano/Documents}:rw
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PROJECTS_ROOT:-./projects}:/workspace/projects:ro
     networks:
       - hub-core
       - hub-observability
@@ -60,8 +76,16 @@ services:
   web:
     image: nginx:1.27.5-alpine
     profiles: ["core"]
+    mem_limit: ${HUB_WEB_MEM_LIMIT:-128m}
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /var/cache/nginx:rw,noexec,nosuid,size=16m
+      - /var/run:rw,noexec,nosuid,size=2m
     ports:
-      - "${HUB_WEB_PORT:-18000}:80"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${HUB_WEB_PORT:-18000}:80"
     volumes:
       - ./apps/web:/usr/share/nginx/html:ro
     depends_on:
@@ -79,12 +103,13 @@ services:
     image: postgres:16.4-alpine
     profiles: ["stateful"]
     mem_limit: ${HUB_POSTGRES_MEM_LIMIT:-384m}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       POSTGRES_USER: ${HUB_POSTGRES_USER:-hub}
-      POSTGRES_PASSWORD: ${HUB_POSTGRES_PASSWORD:-change-me-local-only}
+      POSTGRES_PASSWORD: ${HUB_POSTGRES_PASSWORD:-}
       POSTGRES_DB: ${HUB_POSTGRES_DB:-qualityhub}
-    ports:
-      - "${HUB_POSTGRES_PORT:-15432}:5432"
     volumes:
       - hub_postgres_data:/var/lib/postgresql/data
     networks:
@@ -99,9 +124,14 @@ services:
     image: redis:7.4.1-alpine
     profiles: ["stateful"]
     mem_limit: ${HUB_REDIS_MEM_LIMIT:-128m}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
     command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "${HUB_REDIS_PORT:-16379}:6379"
     volumes:
       - hub_redis_data:/data
     networks:
@@ -116,15 +146,18 @@ services:
     image: ${SONARQUBE_IMAGE:-sonarqube:community}
     profiles: ["quality"]
     mem_limit: ${SONARQUBE_MEM_LIMIT:-2g}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       sonar-postgres:
         condition: service_healthy
     ports:
-      - "${SONARQUBE_PORT:-9000}:9000"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${SONARQUBE_PORT:-9000}:9000"
     environment:
       SONAR_JDBC_URL: jdbc:postgresql://sonar-postgres:5432/${SONAR_POSTGRES_DB:-sonarqube}
       SONAR_JDBC_USERNAME: ${SONAR_POSTGRES_USER:-sonar}
-      SONAR_JDBC_PASSWORD: ${SONAR_POSTGRES_PASSWORD:-change-me-local-only}
+      SONAR_JDBC_PASSWORD: ${SONAR_POSTGRES_PASSWORD:-}
       SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
       SONAR_WEB_JAVAOPTS: ${SONAR_WEB_JAVAOPTS:--Xms128m -Xmx512m}
       SONAR_CE_JAVAOPTS: ${SONAR_CE_JAVAOPTS:--Xms128m -Xmx512m}
@@ -145,9 +178,12 @@ services:
     image: postgres:16.4-alpine
     profiles: ["quality"]
     mem_limit: ${SONAR_POSTGRES_MEM_LIMIT:-512m}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       POSTGRES_USER: ${SONAR_POSTGRES_USER:-sonar}
-      POSTGRES_PASSWORD: ${SONAR_POSTGRES_PASSWORD:-change-me-local-only}
+      POSTGRES_PASSWORD: ${SONAR_POSTGRES_PASSWORD:-}
       POSTGRES_DB: ${SONAR_POSTGRES_DB:-sonarqube}
     volumes:
       - hub_sonar_postgres_data:/var/lib/postgresql/data
@@ -163,13 +199,20 @@ services:
     image: prom/prometheus:v2.55.1
     profiles: ["metrics", "observability"]
     mem_limit: ${PROMETHEUS_MEM_LIMIT:-512m}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-24h}
       - --storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-512MB}
       - --web.enable-lifecycle
     ports:
-      - "${PROMETHEUS_PORT:-19090}:9090"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${PROMETHEUS_PORT:-19090}:9090"
     volumes:
       - ./config/prometheus:/etc/prometheus:ro
       - hub_prometheus_data:/prometheus
@@ -186,13 +229,25 @@ services:
     image: grafana/grafana:11.4.0
     profiles: ["metrics", "observability"]
     mem_limit: ${GRAFANA_MEM_LIMIT:-384m}
+    restart: unless-stopped
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ "$${GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION}" != "true" ]; then
+          test -n "$${GF_SECURITY_ADMIN_USER}" || { echo "GRAFANA_ADMIN_USER is required" >&2; exit 1; }
+          test -n "$${GF_SECURITY_ADMIN_PASSWORD}" || { echo "GRAFANA_ADMIN_PASSWORD is required" >&2; exit 1; }
+        fi
+        exec /run.sh
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION: ${GRAFANA_DISABLE_INITIAL_ADMIN_CREATION:-true}
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
     ports:
-      - "${GRAFANA_PORT:-13000}:3000"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${GRAFANA_PORT:-13000}:3000"
     volumes:
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -212,9 +267,13 @@ services:
     image: grafana/loki:3.3.2
     profiles: ["logging", "observability"]
     mem_limit: ${LOKI_MEM_LIMIT:-512m}
+    restart: unless-stopped
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
     command: ["-config.file=/etc/loki/loki-config.yml"]
     ports:
-      - "${LOKI_PORT:-13100}:3100"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${LOKI_PORT:-13100}:3100"
     volumes:
       - ./config/loki:/etc/loki:ro
       - hub_loki_data:/loki
@@ -230,12 +289,16 @@ services:
     image: grafana/tempo:2.6.1
     profiles: ["tracing", "observability"]
     mem_limit: ${TEMPO_MEM_LIMIT:-512m}
+    restart: unless-stopped
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
     command: ["-config.file=/etc/tempo/tempo.yml"]
     depends_on:
       tempo-init:
         condition: service_completed_successfully
     ports:
-      - "${TEMPO_PORT:-13200}:3200"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${TEMPO_PORT:-13200}:3200"
     volumes:
       - ./config/tempo:/etc/tempo:ro
       - hub_tempo_data:/tmp/tempo
@@ -250,6 +313,10 @@ services:
   tempo-init:
     image: busybox:1.36.1
     profiles: ["tracing", "observability"]
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN"]
+    security_opt:
+      - no-new-privileges:true
     command:
       - sh
       - -c
@@ -263,10 +330,15 @@ services:
     image: otel/opentelemetry-collector-contrib:0.116.1
     profiles: ["tracing", "observability"]
     mem_limit: ${OTEL_COLLECTOR_MEM_LIMIT:-384m}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
     command: ["--config=/etc/otelcol/config.yml"]
     ports:
-      - "${OTEL_GRPC_PORT:-14317}:4317"
-      - "${OTEL_HTTP_PORT:-14318}:4318"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${OTEL_GRPC_PORT:-14317}:4317"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${OTEL_HTTP_PORT:-14318}:4318"
     volumes:
       - ./config/otel/otel-collector-config.yml:/etc/otelcol/config.yml:ro
     depends_on:
@@ -279,9 +351,16 @@ services:
     image: prom/alertmanager:v0.27.0
     profiles: ["alerting", "observability"]
     mem_limit: ${ALERTMANAGER_MEM_LIMIT:-128m}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
     command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
     ports:
-      - "${ALERTMANAGER_PORT:-19093}:9093"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${ALERTMANAGER_PORT:-19093}:9093"
     volumes:
       - ./config/alertmanager:/etc/alertmanager:ro
       - hub_alertmanager_data:/alertmanager
@@ -297,9 +376,14 @@ services:
     image: prom/blackbox-exporter:v0.25.0
     profiles: ["alerting", "observability", "infra"]
     mem_limit: ${BLACKBOX_MEM_LIMIT:-128m}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
     command: ["--config.file=/etc/blackbox/blackbox.yml"]
     ports:
-      - "${BLACKBOX_PORT:-19115}:9115"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${BLACKBOX_PORT:-19115}:9115"
     volumes:
       - ./config/blackbox:/etc/blackbox:ro
     networks:
@@ -310,23 +394,32 @@ services:
       context: .
       dockerfile: Dockerfile.jenkins
     profiles: ["ci"]
-    user: "0:0"
     mem_limit: ${JENKINS_MEM_LIMIT:-1536m}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        test -n "$${JENKINS_ADMIN_ID}" || { echo "JENKINS_ADMIN_ID is required" >&2; exit 1; }
+        test -n "$${JENKINS_ADMIN_PASSWORD}" || { echo "JENKINS_ADMIN_PASSWORD is required" >&2; exit 1; }
+        exec /usr/bin/tini -- /usr/local/bin/jenkins.sh
     environment:
-      JENKINS_ADMIN_ID: ${JENKINS_ADMIN_ID:-admin}
-      JENKINS_ADMIN_PASSWORD: ${JENKINS_ADMIN_PASSWORD:-admin}
+      JENKINS_ADMIN_ID: ${JENKINS_ADMIN_ID:-}
+      JENKINS_ADMIN_PASSWORD: ${JENKINS_ADMIN_PASSWORD:-}
       JENKINS_URL: ${JENKINS_URL:-http://localhost:18082/}
       CASC_JENKINS_CONFIG: /var/jenkins_home/casc.yaml
       JAVA_OPTS: ${JENKINS_JAVA_OPTS:--Djenkins.install.runSetupWizard=false -Xms128m -Xmx768m}
     ports:
-      - "${JENKINS_PORT:-18082}:8080"
-      - "${JENKINS_AGENT_PORT:-50000}:50000"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${JENKINS_PORT:-18082}:8080"
     volumes:
       - hub_jenkins_home:/var/jenkins_home
       - ./config/jenkins/casc.yaml:/var/jenkins_home/casc.yaml:ro
       - ./config/jenkins/seed:/var/jenkins_home/seed:ro
-      - ${PROJECTS_ROOT:-/Users/martiniano/Documents}:/workspace/projects:rw
-      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - hub-core
     healthcheck:
@@ -340,8 +433,13 @@ services:
     profiles: ["infra", "observability"]
     mem_limit: ${CADVISOR_MEM_LIMIT:-256m}
     privileged: false
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
     ports:
-      - "${CADVISOR_PORT:-18081}:8080"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${CADVISOR_PORT:-18081}:8080"
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
@@ -371,4 +469,6 @@ volumes:
 networks:
   hub-core:
   hub-quality:
+    internal: true
   hub-observability:
+    internal: true

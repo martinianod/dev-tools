@@ -1236,6 +1236,16 @@ a:focus-visible,
   line-height: 1.5;
 }
 
+.security-access-card {
+  grid-column: span 2;
+}
+
+.inline-security-form {
+  margin-top: var(--space-3);
+  grid-template-columns: minmax(14rem, 1fr) auto;
+  align-items: end;
+}
+
 .empty-state {
   padding: var(--space-5);
   border: 1px dashed var(--line-strong);

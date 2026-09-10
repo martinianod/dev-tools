@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 const baseUrl = process.env.HUB_TEST_BASE_URL || "http://127.0.0.1:18080";
+const authToken = process.env.HUB_TEST_AUTH_TOKEN || "";
 
 async function fetchJson(path) {
   const response = await fetch(`${baseUrl}${path}`);
@@ -12,7 +13,10 @@ async function fetchJson(path) {
 async function postJson(path, body = {}, expectedStatus = 200) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
+    },
     body: JSON.stringify(body)
   });
   const text = await response.text();
@@ -79,9 +83,13 @@ test("running hub API exposes project tool links, git, freshness and static UI",
   assert.ok(platform.services.some((service) => service.name === "sonarqube" && service.required === false && service.profile === "quality"));
   assert.ok(platform.services.some((service) => service.name === "prometheus" && service.required === false && service.profile === "metrics"));
 
+  const securitySession = await fetchJson("/api/v1/security/session");
+  assert.match(securitySession.authentication, /^(CONFIGURED|READ_ONLY)$/);
+  assert.match(securitySession.privilegedExecution, /^(ENABLED_LOCAL|DISABLED)$/);
+
   const agents = await fetchJson("/api/v1/agents/overview");
   assert.equal(agents.policy.phase, "Fase 9");
-  assert.equal(agents.policy.secretValues, "never_read_or_returned");
+  assert.equal(agents.policy.secretValues, "resolved_only_at_execution_boundary_never_returned");
   assert.equal(agents.policy.arbitraryCommands, "blocked");
   assert.equal(agents.counts.agents, 1);
   assert.equal(agents.agents[0].status, "CONNECTED");
@@ -252,8 +260,9 @@ test("running hub API exposes project tool links, git, freshness and static UI",
   assert.ok(projectChanges.changes);
   assert.ok(projectChanges.differences.localVsEnvironment);
 
-  const blockedVolumeDelete = await postJson("/api/v1/projects/chedoparti-react-app/runtime/volumes/delete", {}, 409);
-  assert.equal(blockedVolumeDelete.title, "VOLUME_DELETE_CONFIRMATION_REQUIRED");
+  const volumeDeleteStatus = securitySession.privilegedExecution === "DISABLED" ? 503 : 409;
+  const blockedVolumeDelete = await postJson("/api/v1/projects/chedoparti-react-app/runtime/volumes/delete", {}, volumeDeleteStatus);
+  assert.equal(blockedVolumeDelete.title, securitySession.privilegedExecution === "DISABLED" ? "PRIVILEGED_EXECUTION_DISABLED" : "VOLUME_DELETE_CONFIRMATION_REQUIRED");
 
   const refreshedInfrastructure = await postJson("/api/v1/projects/chedoparti-react-app/infrastructure/refresh", { adapter: "local" }, 200);
   assert.equal(refreshedInfrastructure.projectSlug, "chedoparti-react-app");

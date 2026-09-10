@@ -4,11 +4,11 @@ Plataforma local para registrar proyectos existentes, ejecutar acciones de calid
 
 ## Estado actual
 
-Fase implementada: centro de control local para Foundation + Quality + Observability + Cloud/Infrastructure + Jobs/Testing + Deployments + Living Documentation + Adapter Discovery Cache + Git/Versions + Living Documentation v2 + UX operativa.
+Fase implementada: centro de control local para Foundation + Quality + Observability + Cloud/Infrastructure + Jobs/Testing + Deployments + Living Documentation + Adapter Discovery Cache + Git/Versions + Living Documentation v2 + UX operativa. M0 Security Containment agrega binding loopback, auth local, roles, trust de proyectos, CORS/SSRF guards y un perfil Docker core sin ejecucion privilegiada.
 
 - Control API y worker local sin dependencias externas de npm.
 - UI web convertida en workspace operativo: resumen global, busqueda, filtros de estado, catalogo, prioridades, detalle por proyecto, command palette y onboarding checklist.
-- Configuracion runtime por proyecto desde la UI: Sonar host, token redaccionado, scan scope, modo scanner, memoria y variables permitidas.
+- Configuracion runtime por proyecto desde la UI: Sonar host allowlisted, trust, scan scope, modo scanner, memoria y variables no secretas permitidas.
 - Drawer amplio por proyecto con tabs internas para resumen, entorno, calidad, terminal, ejecuciones y configuracion.
 - Local Run Engine por proyecto: start/stop/restart de Docker Compose, deteccion de conflictos de puertos, recursos activos y logs de contenedor.
 - Links por proyecto a GitHub/GitLab, branches, PRs/MRs, SonarQube, Jenkins, Grafana, Prometheus y Alertmanager, con validacion accionable desde la UI.
@@ -65,7 +65,7 @@ Brechas principales cerradas en este MVP:
 Brechas que quedan para siguientes fases:
 
 - Migrar persistencia JSON local a PostgreSQL con migraciones reproducibles.
-- RBAC real y autenticacion.
+- Identidades multiusuario/RBAC durable; M0 solo provee un principal Bearer local con roles centralizados.
 - Runners especializados por stack con coverage profundo por proyecto.
 - Instrumentacion real de cada proyecto externo.
 - Tests E2E Playwright y accesibilidad automatizada.
@@ -77,30 +77,33 @@ Brechas que quedan para siguientes fases:
 - Node.js `>=22`.
 - Docker Compose.
 - SonarQube local en `http://localhost:9000` si se quiere importar calidad.
-- Para usar Local Run Engine desde Docker, Docker socket montado en la API (`/var/run/docker.sock`). En ejecucion nativa, alcanza con Docker CLI disponible.
+- El perfil Docker `core` es read-only y no monta Docker socket. Las operaciones locales privilegiadas requieren ejecucion nativa explicita, loopback, autenticada y sobre proyectos `TRUSTED_LOCAL`.
 
 ## Configuracion
 
 ```bash
-cd /Users/martiniano/Documents/dev-tools
+cd /ruta/a/dev-tools
 cp .env.example .env
 ```
 
-Para esta maquina, el valor recomendado es:
+Configurar una raiz de proyectos explicita y portable:
 
 ```dotenv
-PROJECTS_ROOT=/Users/martiniano/Documents
+PROJECTS_ROOT=/ruta/absoluta/a/proyectos
 SONAR_HOST_URL=http://host.docker.internal:9000
+HUB_AUTH_TOKEN=<valor-aleatorio-de-32-o-mas-caracteres>
+HUB_AUTH_ACTOR_ID=<identidad-local>
+HUB_AUTH_ROLE=ADMIN
 ```
 
 Si corres la API nativa fuera de Docker, podes usar:
 
 ```bash
-export PROJECTS_ROOT=/Users/martiniano/Documents
+export PROJECTS_ROOT=/ruta/absoluta/a/proyectos
 export SONAR_HOST_URL=http://127.0.0.1:9000
 ```
 
-El token de SonarQube nunca va en Git. Para ejecuciones desde el panel, cargalo en `Proyecto -> Configuracion -> Variables de ejecucion`; queda persistido solo en la data local del hub (`HUB_DATA_DIR`/volumen Docker), el API no lo devuelve al navegador y solo muestra si esta configurado.
+Los secretos nunca van en Git ni en la configuracion runtime persistida. `SONAR_TOKEN`, `HUB_AUTH_TOKEN`, passwords de Grafana/Jenkins/PostgreSQL y equivalentes se suministran mediante environment externo. La UI solo conserva el token Bearer del hub en `sessionStorage` hasta cerrar la sesion del navegador.
 
 Tambien podes usar variable de entorno global si ejecutas scripts por consola:
 
@@ -122,7 +125,7 @@ export HUB_PROJECT_DESCRIPTOR=/ruta/project-catalog.yaml
 
 Si pegaste un token en una terminal compartida, chat o log, revocalo y crea uno nuevo. Un intento fallido de scanner no consume ni invalida el token; si parece pasar eso, revisa expiracion, permisos del usuario y `SONAR_HOST_URL`.
 
-Para levantar o detener un proyecto no hace falta ejecutar comandos por consola: abrir el proyecto en el panel, entrar a `Gestion de entorno` o `Terminal` y usar `Start`, `Restart`, `Rebuild changed components`, `Clean rebuild`, `Pull and rebuild` o `Stop`. La tabla de recursos muestra contenedores asociados, puertos publicados y accesos rapidos a `localhost`.
+Para levantar o detener un proyecto desde el panel, la API debe ejecutarse en modo nativo seguro: `HUB_PRIVILEGED_EXECUTION_ENABLED=1`, bind loopback, credencial externa y proyecto `TRUSTED_LOCAL`. El perfil Compose `core` permite discovery y administración no privilegiada, pero rechaza runtime/jobs con `PRIVILEGED_EXECUTION_DISABLED`.
 
 `Start` es la accion normal recomendada. Antes de ejecutar refresca Git, calcula un fingerprint de fuentes/configuracion/variables no secretas y lo compara con el ultimo deploy local registrado. Si no hay deploy previo o el fingerprint cambio, fuerza rebuild/recreate sin borrar volumenes persistentes. Si el codigo local cambia despues del deploy, el proyecto se marca como `Obsoleto` y el Action Center ofrece volver a levantarlo.
 
@@ -142,8 +145,12 @@ npm run check
 Ejecutar API nativa:
 
 ```bash
-PROJECTS_ROOT=/Users/martiniano/Documents \
+PROJECTS_ROOT=/ruta/absoluta/a/proyectos \
 SONAR_HOST_URL=http://127.0.0.1:9000 \
+HUB_AUTH_TOKEN=<secreto-externo> \
+HUB_AUTH_ACTOR_ID=<identidad-local> \
+HUB_AUTH_ROLE=ADMIN \
+HUB_PRIVILEGED_EXECUTION_ENABLED=1 \
 npm start
 ```
 
@@ -165,7 +172,7 @@ Equivalente manual:
 docker compose --profile core up -d
 ```
 
-`control-api` monta `./apps/control-api`, `./apps/web` y `package.json` en modo lectura. En desarrollo, un reinicio sin `--build` toma los cambios de backend/frontend del hub usando la imagen local existente. Reconstruir la imagen solo es necesario si cambia `Dockerfile.api` o las dependencias/base de la imagen.
+`control-api` corre non-root con filesystem read-only, monta el project root una sola vez en modo lectura y no recibe `/var/run/docker.sock`. `docs/live` y los volúmenes de data/cache son sus únicas superficies de escritura deliberadas.
 
 `hub-postgres` y `redis` quedan en el perfil opcional `stateful`. El backend actual persiste en `HUB_DATA_DIR/state.json`; no necesita esos dos contenedores para usar el panel.
 
@@ -219,7 +226,7 @@ UI:
 http://localhost:18082
 ```
 
-Credenciales locales por defecto: `admin` / `admin`. Cambialas con `JENKINS_ADMIN_ID` y `JENKINS_ADMIN_PASSWORD` en `.env`.
+Jenkins no tiene credenciales funcionales por defecto: antes de activar el perfil se deben suministrar `JENKINS_ADMIN_ID` y `JENKINS_ADMIN_PASSWORD` externamente. M0 elimina Docker socket, ejecución root, agent port y mount de proyectos del contenedor Jenkins; los Jenkinsfiles que construyan imágenes Docker requieren migración futura a un runner aislado.
 
 El perfil `ci` crea jobs multibranch para los proyectos con remoto Git desde `config/jenkins/seed/jobs.groovy`. Actualmente quedan configurados Chedoparti, Maria Belen, Sistema Dietetica y Giftfinder; `panorama-mercados` queda pendiente porque la carpeta local no es repo Git. Cada repo necesita un `Jenkinsfile` en la raiz para ejecutar build, tests, coverage, Sonar y build de imagen Docker. Mientras Jenkins sea local, GitHub no puede disparar webhooks directamente salvo que publiques Jenkins por HTTPS o uses un tunnel seguro; el default local escanea branches cada 5 minutos.
 
@@ -239,6 +246,8 @@ docker compose --profile core up -d --build
 El rebuild necesita que Docker Desktop pueda resolver Docker Hub (`registry-1.docker.io`). Si falla DNS/proxy, el arranque sin `--build` puede seguir funcionando con la imagen local ya construida.
 
 ## Puertos
+
+Todos los puertos publicados usan `HUB_BIND_ADDRESS=127.0.0.1` por defecto. PostgreSQL y Redis no se publican al host; se administran con `docker compose exec`. Un bind no-loopback sin `HUB_AUTH_TOKEN` impide el arranque; si se configura exposición remota explícita, las lecturas de API y métricas también requieren Bearer.
 
 | Servicio | Puerto host |
 | --- | ---: |
@@ -261,8 +270,11 @@ Base local:
 http://127.0.0.1:18080/api/v1
 ```
 
+Los GET permanecen disponibles en modo local de lectura. Toda mutación requiere `Authorization: Bearer <HUB_AUTH_TOKEN>` y la policy central asigna `READ`, `OPERATE` o `ADMIN`. `GET /api/v1/security/session` informa el estado sin devolver la credencial.
+
 Endpoints principales:
 
+- `GET /security/session`
 - `GET /catalog/descriptor`
 - `GET /projects`
 - `POST /projects/discover`
@@ -358,7 +370,9 @@ El dashboard propio consolida y enlaza; no reemplaza las UI avanzadas de SonarQu
 - `No approved template`: el repo no tiene script de test/build/Sonar detectado. Ejecutar Doctor para ver brecha.
 - `No Docker Compose manifest was detected`: el proyecto no tiene `compose.yml`, `compose.yaml`, `docker-compose.yml` o `docker-compose.yaml` detectable.
 - `Docker CLI is not available`: Docker Desktop no esta levantado o la API corre en Docker sin acceso al socket.
-- `permission denied while trying to connect to the Docker daemon socket`: `control-api` quedo corriendo con una definicion vieja sin permisos sobre `/var/run/docker.sock`. Recrear el servicio con el compose actualizado.
+- `AUTHENTICATION_REQUIRED`: configurar la credencial externa y cargarla en la sección Configuración de la UI.
+- `PRIVILEGED_EXECUTION_DISABLED`: el perfil Compose seguro no ejecuta proyectos; usar la API nativa con el opt-in documentado.
+- `PROJECT_EXECUTION_FORBIDDEN`: cambiar el trust a `TRUSTED_LOCAL` con rol ADMIN solo después de revisar el repositorio.
 - `PORT_CONFLICT`: un puerto declarado por el compose esta ocupado por otro contenedor/proceso. El panel muestra el owner detectado cuando Docker lo informa.
 - Puerto del hub ocupado: cambiar el puerto en `.env` o apagar el servicio existente.
 - `failed to resolve source metadata ... registry-1.docker.io ... no such host`: Docker Desktop no puede resolver Docker Hub. No es un error del codigo. Si la imagen local ya existe, usar `./scripts/hub-up-lite.sh` o `./scripts/hub-up-metrics.sh` sin `--build`. Para rebuild, reiniciar Docker Desktop, revisar VPN/proxy/DNS y correr `./scripts/docker-registry-doctor.sh`.

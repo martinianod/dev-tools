@@ -47,9 +47,10 @@ Tools
 - Persistencia JSON local inicial, con contrato API preparado para migrar a PostgreSQL.
 - Descriptor YAML central para estado declarado de proyectos, componentes y ambientes.
 - Comandos de ejecucion derivados exclusivamente de templates detectados.
-- No se monta `/` ni `$HOME`.
-- El perfil Docker monta `/var/run/docker.sock` solo para Local Run Engine local.
-- `PROJECTS_ROOT` es el unico punto de acceso a repositorios.
+- `PROJECTS_ROOT` es el unico punto de acceso a repositorios y se monta read-only en el perfil Docker seguro.
+- M0 elimina Docker socket y ejecucion root del Control API containerizado; `docs/live`, data y caches son las escrituras acotadas.
+- El Local Run Engine privilegiado queda como compatibilidad nativa opt-in, autenticada, loopback y limitada a proyectos `TRUSTED_LOCAL`.
+- CORS, autenticacion Bearer local, roles `READ`/`OPERATE`/`ADMIN`, rate limit y upstream allowlists se aplican antes del routing.
 
 ## Modelo logico
 
@@ -224,7 +225,7 @@ Fase 7 no inventa estados. Genera documentacion desde fuentes ya verificadas por
 - `latestDiscovery`: snapshot sanitizado por proyecto con Git, tags, stack, manifests, runtime, procesos, servicios locales, puertos, health checks y variables requeridas redaccionadas.
 - `counts`: agentes, conexion, proyectos detectados y errores de discovery.
 
-Fase 9 modela al agente local como el propio Control API embebido. No introduce daemon separado, no ejecuta comandos arbitrarios y no devuelve valores de secretos. El heartbeat y el refresh de discovery quedan auditados como `agent.heartbeat` y `agent.discovery.refresh`.
+Fase 9 modela al agente local como el propio Control API embebido. M0 no introduce daemon separado: limita las operaciones privilegiadas mediante auth, rol, trust, allowlist, timeout y output limit, y las deshabilita en Compose. Los secretos pueden resolverse solamente en la frontera de ejecucion autorizada y nunca se retornan. El heartbeat y el refresh de discovery quedan auditados como `agent.heartbeat` y `agent.discovery.refresh`.
 
 ## Flujo de job
 

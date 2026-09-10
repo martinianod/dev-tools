@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-PROJECTS_ROOT="${PROJECTS_ROOT:-/Users/martiniano/Documents}"
+PROJECTS_ROOT="${PROJECTS_ROOT:-$(dirname "$ROOT_DIR")}"
 HUB_API_PORT="${HUB_API_PORT:-18080}"
 HUB_WEB_PORT="${HUB_WEB_PORT:-18000}"
 SONAR_HOST_URL="${SONAR_HOST_URL:-http://127.0.0.1:9000}"
@@ -56,6 +56,18 @@ if [ -f .env ]; then
   pass ".env exists"
 else
   warn ".env missing; copy .env.example to .env before Docker startup if you need custom values"
+fi
+
+if [ -n "${HUB_AUTH_TOKEN:-}" ] && [ ${#HUB_AUTH_TOKEN} -ge 32 ] && [ -n "${HUB_AUTH_ACTOR_ID:-}" ]; then
+  pass "local mutation authentication is configured"
+else
+  warn "API is read-only until HUB_AUTH_TOKEN (32+ chars) and HUB_AUTH_ACTOR_ID are configured"
+fi
+
+if [ "${HUB_PRIVILEGED_EXECUTION_ENABLED:-0}" = "1" ]; then
+  warn "privileged native execution is enabled; confirm loopback binding and TRUSTED_LOCAL projects"
+else
+  pass "privileged execution disabled by default"
 fi
 
 node --check apps/control-api/server.mjs >/dev/null && pass "control API syntax" || fail "control API syntax"

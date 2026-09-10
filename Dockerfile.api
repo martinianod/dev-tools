@@ -39,14 +39,18 @@ COPY README.md AGENTS.md PROMPT_MASTER_PLATFORM.md ./
 COPY docs ./docs
 COPY data ./data
 
-RUN mkdir -p /app/data/jobs && chown -R node:node /app
+RUN mkdir -p /app/data/jobs /home/node/.m2 /home/node/.gradle /home/node/.npm \
+    && chown -R node:node /app /home/node
 
 USER node
 
 ENV NODE_ENV=production
+# The process listens on the container interface; Compose publishes it only on
+# the host loopback address.
 ENV HUB_API_HOST=0.0.0.0
 ENV HUB_API_PORT=18080
 ENV HUB_DATA_DIR=/app/data
+ENV HUB_PRIVILEGED_EXECUTION_ENABLED=0
 ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk
 ENV PATH="/opt/sonar-scanner/bin:${PATH}"
 

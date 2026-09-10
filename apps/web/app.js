@@ -8,6 +8,7 @@ const DEFAULT_API_BASE = (() => {
   return "http://localhost:18080";
 })();
 const API_BASE = window.localStorage.getItem("qualityHubApiBase") || window.QUALITY_HUB_API_BASE || DEFAULT_API_BASE;
+const AUTH_TOKEN_KEY = "qualityHubSessionToken";
 
 const state = {
   projects: [],
@@ -89,7 +90,11 @@ const els = {
   improvementCategories: document.querySelector("#improvementCategories"),
   improvementGeneratedAt: document.querySelector("#improvementGeneratedAt"),
   improvementList: document.querySelector("#improvementList"),
-  improvementPrompt: document.querySelector("#improvementPrompt")
+  improvementPrompt: document.querySelector("#improvementPrompt"),
+  securitySessionStatus: document.querySelector("#securitySessionStatus"),
+  securityTokenForm: document.querySelector("#securityTokenForm"),
+  securityTokenInput: document.querySelector("#securityTokenInput"),
+  clearSecurityToken: document.querySelector("#clearSecurityToken")
 };
 
 document.querySelector("#refreshButton").addEventListener("click", loadAll);
@@ -127,6 +132,8 @@ document.querySelector("#discoverButton").addEventListener("click", discoverProj
 document.querySelector("#commandMenuButton").addEventListener("click", openCommandDialog);
 document.querySelector("#closeCommandDialog").addEventListener("click", closeCommandDialog);
 els.projectForm.addEventListener("submit", saveProject);
+els.securityTokenForm?.addEventListener("submit", saveSecurityToken);
+els.clearSecurityToken?.addEventListener("click", clearSecurityToken);
 els.globalSearch.addEventListener("input", () => {
   state.query = els.globalSearch.value.trim().toLowerCase();
   renderWorkspace();
@@ -179,28 +186,63 @@ loadAll();
 setInterval(() => loadProjects().catch(() => {}), 8000);
 
 async function api(path, options = {}) {
+  const token = window.sessionStorage.getItem(AUTH_TOKEN_KEY) || "";
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(options.headers || {})
     }
   });
   const text = await response.text();
   const data = text ? JSON.parse(text) : null;
   if (!response.ok) {
-    throw new Error(data?.detail || data?.title || `HTTP ${response.status}`);
+    const suffix = response.status === 401 ? " Configura el token local en Configuracion." : "";
+    throw new Error(`${data?.detail || data?.title || `HTTP ${response.status}`}${suffix}`);
   }
   return data;
 }
 
 async function loadAll() {
   try {
-    await Promise.all([loadPlatformStatus(), loadLocalAgent(), loadProjects()]);
+    await Promise.all([loadPlatformStatus(), loadSecuritySession(), loadLocalAgent(), loadProjects()]);
     await loadImprovements({ silent: true });
   } catch (error) {
     toast(error.message, "error");
   }
+}
+
+async function loadSecuritySession() {
+  if (!els.securitySessionStatus) return;
+  try {
+    const session = await api("/api/v1/security/session");
+    els.securitySessionStatus.textContent = session.authenticated
+      ? `${session.actor} · ${session.role} · ejecucion ${session.privilegedExecution.toLowerCase()}`
+      : "Modo lectura: las mutaciones requieren token";
+  } catch (error) {
+    els.securitySessionStatus.textContent = error.message;
+  }
+}
+
+async function saveSecurityToken(event) {
+  event.preventDefault();
+  const token = String(els.securityTokenInput?.value || "").trim();
+  if (!token) {
+    toast("Ingresá el token local configurado en el backend", "error");
+    return;
+  }
+  window.sessionStorage.setItem(AUTH_TOKEN_KEY, token);
+  if (els.securityTokenInput) els.securityTokenInput.value = "";
+  await loadSecuritySession();
+  toast("Credencial cargada para esta sesion");
+}
+
+async function clearSecurityToken() {
+  window.sessionStorage.removeItem(AUTH_TOKEN_KEY);
+  if (els.securityTokenInput) els.securityTokenInput.value = "";
+  await loadSecuritySession();
+  toast("Credencial eliminada de la sesion");
 }
 
 async function loadPlatformStatus() {
@@ -2151,7 +2193,7 @@ function renderConfiguration(project) {
       ${metric("Repository path", project.repositoryPath, "Relativo a PROJECTS_ROOT")}
       ${metric("Sonar key", project.sonarProjectKey, "Clave estable")}
       ${metric("Branch", project.defaultBranch || "main", "Git")}
-      ${metric("Estado", project.status, "Registry")}
+      ${metric("Estado", project.status, `Trust: ${project.trust || "UNTRUSTED"}`)}
     </div>
     ${setupHintList(project)}
     <h3>Variables de ejecucion</h3>
@@ -2162,8 +2204,11 @@ function renderConfiguration(project) {
           <input name="sonarHostUrl" value="${escapeHtml(runtimeConfig.sonarHostUrl || "")}" placeholder="http://host.docker.internal:9000" />
         </label>
         <label>
-          SONAR_TOKEN
-          <input name="sonarToken" type="password" autocomplete="off" placeholder="${runtimeConfig.sonarTokenConfigured ? "Token configurado; dejar vacio para conservarlo" : "Pegar token nuevo"}" />
+          Trust de ejecucion
+          <select name="projectTrust">
+            ${option("UNTRUSTED", project.trust, "UNTRUSTED — solo discovery")}
+            ${option("TRUSTED_LOCAL", project.trust, "TRUSTED_LOCAL — permite perfiles locales")}
+          </select>
         </label>
         <label>
           JENKINS_URL
@@ -2204,16 +2249,12 @@ function renderConfiguration(project) {
             ${option("false", runtimeConfig.ci, "false")}
           </select>
         </label>
-        <label class="checkbox-row">
-          <input name="clearSonarToken" type="checkbox" />
-          <span>Eliminar token guardado para este proyecto</span>
-        </label>
         <label class="span-2">
           Variables adicionales permitidas
           <textarea name="additionalEnv" rows="5" placeholder="MAVEN_OPTS=-Xmx2g&#10;GRADLE_OPTS=-Dorg.gradle.jvmargs=-Xmx2g">${escapeHtml(formatAdditionalEnv(runtimeConfig.additionalEnv || []))}</textarea>
         </label>
       </div>
-      <p class="muted">Permitidas: SONAR_*, VITE_*, NEXT_PUBLIC_*, PUBLIC_*, APP_*, CORS_*, *_PORT, LOCAL_HOST, FRONTEND_URL, BACKEND_URL, SCRAPER_URL, OLLAMA_URL, STRAPI_URL, CI, NODE_ENV, MAVEN_OPTS, GRADLE_OPTS y JAVA_TOOL_OPTIONS. No se aceptan claves con TOKEN, PASSWORD, SECRET o API_KEY en variables adicionales; usa el campo dedicado SONAR_TOKEN.</p>
+      <p class="muted">SONAR_TOKEN se configura solo en el environment del backend. Las variables adicionales son no secretas; claves o valores con apariencia de credencial se rechazan. Los valores no publicos se muestran como [CONFIGURED]. Cambiar trust requiere rol ADMIN.</p>
       <div class="toolbar end">
         <button class="button primary" type="submit">Guardar configuracion</button>
       </div>
@@ -2466,7 +2507,6 @@ async function saveRuntimeConfig(event) {
   const project = state.selectedProject;
   if (!project) return;
   const form = new FormData(event.currentTarget);
-  const sonarToken = String(form.get("sonarToken") || "").trim();
   const runtimeConfig = {
     sonarHostUrl: String(form.get("sonarHostUrl") || "").trim(),
     jenkinsUrl: String(form.get("jenkinsUrl") || "").trim(),
@@ -2476,15 +2516,14 @@ async function saveRuntimeConfig(event) {
     sonarJavascriptNodeMaxspace: String(form.get("sonarJavascriptNodeMaxspace") || "6144").trim(),
     sonarScannerJavaOpts: String(form.get("sonarScannerJavaOpts") || "-Xmx1024m").trim(),
     ci: String(form.get("ci") || "true"),
-    clearSonarToken: form.get("clearSonarToken") === "on",
     additionalEnv: parseAdditionalEnv(String(form.get("additionalEnv") || ""))
   };
-  if (sonarToken) runtimeConfig.sonarToken = sonarToken;
+  const trust = String(form.get("projectTrust") || project.trust || "UNTRUSTED");
 
   try {
     const updated = await api(`/api/v1/projects/${project.id}`, {
       method: "PATCH",
-      body: JSON.stringify({ runtimeConfig })
+      body: JSON.stringify({ runtimeConfig, trust })
     });
     state.selectedProject = updated;
     toast("Configuracion guardada");
@@ -3607,7 +3646,7 @@ function projectSetupHints(project) {
       level: "info",
       title: "Sonar token",
       detail: "Los scans de Sonar requieren token del SonarQube que este levantado.",
-      value: "Configurar SONAR_TOKEN en este panel"
+      value: "Configurar SONAR_TOKEN en el environment del backend"
     });
   }
 

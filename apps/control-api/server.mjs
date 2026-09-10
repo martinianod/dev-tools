@@ -1,19 +1,37 @@
 import http from "node:http";
 import net from "node:net";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  PROJECT_TRUST,
+  applySecurityHeaders,
+  assertProjectExecutionAllowed,
+  authenticateRequest,
+  authorizeRequest,
+  createMutationRateLimiter,
+  createSecurityConfig,
+  evaluateCors,
+  fetchAllowedUpstream,
+  isSensitiveKey,
+  normalizeProjectTrust,
+  redactStructured,
+  requiredRoleForRequest,
+  validateUpstreamUrl
+} from "./security.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../..");
+const defaultProjectsRoot = path.dirname(repoRoot);
 
 const host = process.env.HUB_API_HOST || "127.0.0.1";
 const port = Number(process.env.HUB_API_PORT || 18080);
-const projectsRoot = path.resolve(process.env.PROJECTS_ROOT || "/Users/martiniano/Documents");
-const hostProjectsRoot = path.resolve(process.env.HOST_PROJECTS_ROOT || process.env.PROJECTS_ROOT || "/Users/martiniano/Documents");
+const projectsRoot = path.resolve(process.env.PROJECTS_ROOT || defaultProjectsRoot);
+const hostProjectsRoot = path.resolve(process.env.HOST_PROJECTS_ROOT || process.env.PROJECTS_ROOT || defaultProjectsRoot);
 const dataDir = path.resolve(process.env.HUB_DATA_DIR || path.join(repoRoot, "data"));
 const stateFile = path.join(dataDir, "state.json");
 const jobsDir = path.join(dataDir, "jobs");
@@ -36,6 +54,21 @@ const grafanaUrl = stripTrailingSlash(process.env.GRAFANA_URL || "http://127.0.0
 const jenkinsUrl = stripTrailingSlash(process.env.JENKINS_URL || "http://127.0.0.1:18082");
 const jenkinsInternalUrl = stripTrailingSlash(process.env.JENKINS_INTERNAL_URL || "http://jenkins:8080");
 const runtimeWaitHost = process.env.RUNTIME_WAIT_HOST || "host.docker.internal";
+const securityConfig = createSecurityConfig({
+  ...process.env,
+  HUB_API_PORT: String(port),
+  SONAR_HOST_URL: sonarHostUrl,
+  PROMETHEUS_URL: prometheusUrl,
+  LOKI_URL: lokiUrl,
+  TEMPO_URL: tempoUrl,
+  ALERTMANAGER_URL: alertmanagerUrl,
+  GRAFANA_URL: grafanaUrl,
+  JENKINS_URL: jenkinsUrl,
+  JENKINS_INTERNAL_URL: jenkinsInternalUrl,
+  HUB_ALLOWED_UPSTREAM_ORIGINS: [process.env.HUB_ALLOWED_UPSTREAM_ORIGINS, "http://web"].filter(Boolean).join(",")
+});
+const requestContext = new AsyncLocalStorage();
+const checkMutationRateLimit = createMutationRateLimiter(securityConfig);
 
 const allowedActions = new Set(["full", "doctor", "tests", "coverage", "lint", "build", "sonar", "health", "smoke", "load", "dast"]);
 const allowedRuntimeActions = new Set(["start", "stop", "restart", "status", "logs", "smoke"]);
@@ -160,6 +193,14 @@ function correlationId() {
   return crypto.randomUUID();
 }
 
+function currentPrincipal() {
+  return requestContext.getStore()?.principal || { actor: "system", role: "ADMIN", authenticated: true };
+}
+
+function currentActor() {
+  return currentPrincipal().actor;
+}
+
 function slugify(value) {
   return String(value || "")
     .trim()
@@ -210,11 +251,14 @@ function normalizeRuntimeConfig(input = {}, current = defaultRuntimeConfig()) {
   assignString("ci", 10);
 
   if (input.sonarToken !== undefined && String(input.sonarToken || "").trim()) {
-    next.sonarToken = String(input.sonarToken).trim();
+    throw problem(400, "SECRET_VALUE_NOT_ACCEPTED", "Secret values are not accepted in runtime configuration. Configure SONAR_TOKEN outside the API.");
   }
-  if (input.clearSonarToken === true) {
-    next.sonarToken = "";
-  }
+  // M0 removes the legacy persisted token. Secret values are resolved only from
+  // the process environment at the execution boundary.
+  next.sonarToken = "";
+
+  if (next.sonarHostUrl) validateUpstreamUrl(next.sonarHostUrl, securityConfig);
+  if (next.jenkinsUrl) validateUpstreamUrl(next.jenkinsUrl, securityConfig);
 
   if (!["stable", "backend", "frontend", "full", ""].includes(next.sonarScanScope)) {
     throw problem(400, "INVALID_RUNTIME_CONFIG", "sonarScanScope must be stable, backend, frontend or full.");
@@ -236,10 +280,12 @@ function normalizeRuntimeConfig(input = {}, current = defaultRuntimeConfig()) {
       }))
       .filter((item) => item.key || item.value)
       .map((item) => {
-        if (!isAllowedEnvKey(item.key)) {
+        if (!isAllowedEnvKey(item.key) || isSensitiveKey(item.key) || looksLikeSecretValue(item.value)) {
           throw problem(400, "INVALID_ENV_KEY", `Environment variable '${item.key}' is not allowed.`);
         }
-        return { key: item.key, value: sanitizeText(item.value).slice(0, 1000) };
+        const previous = (merged.additionalEnv || []).find((entry) => entry.key === item.key);
+        const value = item.value === "[CONFIGURED]" && previous ? previous.value : item.value;
+        return { key: item.key, value: sanitizeText(value).slice(0, 1000) };
       })
       .slice(0, 30);
   }
@@ -251,7 +297,7 @@ function publicRuntimeConfig(project) {
   const runtimeConfig = { ...defaultRuntimeConfig(), ...(project.runtimeConfig || {}) };
   return {
     sonarHostUrl: runtimeConfig.sonarHostUrl || sonarHostUrl,
-    sonarTokenConfigured: Boolean(runtimeConfig.sonarToken || process.env.SONAR_TOKEN),
+    sonarTokenConfigured: Boolean(process.env.SONAR_TOKEN),
     jenkinsUrl: runtimeConfig.jenkinsUrl || jenkinsUrl,
     jenkinsJobName: runtimeConfig.jenkinsJobName || "",
     sonarScanScope: runtimeConfig.sonarScanScope || "stable",
@@ -259,13 +305,21 @@ function publicRuntimeConfig(project) {
     sonarJavascriptNodeMaxspace: runtimeConfig.sonarJavascriptNodeMaxspace || "6144",
     sonarScannerJavaOpts: runtimeConfig.sonarScannerJavaOpts || "-Xmx1024m",
     ci: runtimeConfig.ci || "true",
-    additionalEnv: runtimeConfig.additionalEnv || []
+    additionalEnv: (runtimeConfig.additionalEnv || []).map((item) => ({
+      key: item.key,
+      value: /^(VITE_|NEXT_PUBLIC_|PUBLIC_)/.test(item.key) ? item.value : "[CONFIGURED]"
+    }))
   };
+}
+
+function looksLikeSecretValue(value) {
+  const text = String(value || "");
+  return /-----BEGIN [A-Z ]*PRIVATE KEY-----|\bBearer\s+\S+|:\/\/[^\s/:]+:[^\s/@]+@|\b(?:sqp_|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_)[A-Za-z0-9_-]+/i.test(text);
 }
 
 function isAllowedEnvKey(key) {
   if (!/^[A-Z_][A-Z0-9_]{1,80}$/.test(key)) return false;
-  if (/(TOKEN|PASSWORD|PASSWD|SECRET|PRIVATE_KEY|API_KEY|ACCESS_KEY)$/i.test(key)) return false;
+  if (isSensitiveKey(key)) return false;
   const blocked = new Set([
     "PATH",
     "HOME",
@@ -303,7 +357,7 @@ function projectRuntimeEnv(project) {
     if (isAllowedEnvKey(item.key)) env[item.key] = item.value;
   }
   env.SONAR_HOST_URL = runtimeConfig.sonarHostUrl || sonarHostUrl;
-  env.SONAR_TOKEN = runtimeConfig.sonarToken || process.env.SONAR_TOKEN || "";
+  env.SONAR_TOKEN = process.env.SONAR_TOKEN || "";
   env.SONAR_SCAN_SCOPE = runtimeConfig.sonarScanScope || "stable";
   env.SONAR_SCANNER_MODE = runtimeConfig.sonarScannerMode || "cli";
   env.SONAR_SCANNER_DOCKER = runtimeConfig.sonarScannerMode === "docker" ? "1" : "0";
@@ -330,7 +384,7 @@ function sonarConnection(project) {
   const runtimeConfig = { ...defaultRuntimeConfig(), ...(project?.runtimeConfig || {}) };
   return {
     hostUrl: stripTrailingSlash(runtimeConfig.sonarHostUrl || sonarHostUrl),
-    token: runtimeConfig.sonarToken || process.env.SONAR_TOKEN || ""
+    token: process.env.SONAR_TOKEN || ""
   };
 }
 
@@ -481,6 +535,7 @@ function normalizeDescriptorProject(project) {
     sonarProjectKey: sanitizeText(project.sonarProjectKey || slug),
     criticality: sanitizeText(project.criticality || "medium"),
     status: sanitizeText(project.status || "ACTIVE"),
+    trust: normalizeProjectTrust(project.trust || PROJECT_TRUST.UNTRUSTED),
     components: (project.components || []).map(normalizeDescriptorComponent).filter((component) => component.name),
     environments: (project.environments || []).map((environment) => normalizeDescriptorEnvironment(environment, slug)).filter((environment) => environment.name)
   };
@@ -535,6 +590,7 @@ function descriptorSeeds(catalog) {
     owner: project.owner,
     team: project.team,
     criticality: project.criticality,
+    trust: project.trust,
     domain: project.team || project.owner || "local platform"
   }));
 }
@@ -628,11 +684,20 @@ async function ensureDataStore() {
   }
   if (ensureLocalAgentRecord()) migrated = true;
   for (const project of state.projects || []) {
+    if (!project.trust) {
+      const declared = descriptorProjectFor(catalog, project);
+      project.trust = normalizeProjectTrust(declared?.trust || PROJECT_TRUST.UNTRUSTED);
+      migrated = true;
+    } else {
+      project.trust = normalizeProjectTrust(project.trust);
+    }
     if (!project.runtimeConfig) {
       project.runtimeConfig = defaultRuntimeConfig();
       migrated = true;
     } else {
+      const previousRuntimeConfig = JSON.stringify(project.runtimeConfig);
       project.runtimeConfig = normalizeRuntimeConfig({}, project.runtimeConfig);
+      if (previousRuntimeConfig !== JSON.stringify(project.runtimeConfig)) migrated = true;
     }
     if (!state.localRuntimes[project.id]) {
       state.localRuntimes[project.id] = defaultLocalRuntime(project.id, project.slug);
@@ -704,7 +769,7 @@ function addRuntimeLog(project, level, message) {
   runtime.logs.push({
     timestamp: nowIso(),
     level,
-    message: sanitizeText(message)
+    message: sanitizeText(message).slice(0, 4000)
   });
   if (runtime.logs.length > 1500) runtime.logs = runtime.logs.slice(-1500);
   runtime.updatedAt = nowIso();
@@ -719,7 +784,7 @@ async function saveState() {
 async function appendAudit(action, target, result, metadata = {}) {
   state.auditEvents.unshift({
     id: crypto.randomUUID(),
-    actor: "local-user",
+    actor: currentActor(),
     action,
     target,
     result,
@@ -732,15 +797,13 @@ async function appendAudit(action, target, result, metadata = {}) {
 }
 
 function sanitizeMetadata(value) {
-  return JSON.parse(JSON.stringify(value, (_key, item) => {
-    if (typeof item !== "string") return item;
-    return sanitizeText(item);
-  }));
+  return redactStructured(value, sanitizeText);
 }
 
 function sanitizeText(input) {
   let output = String(input || "");
   const secrets = [
+    securityConfig.authToken,
     process.env.SONAR_TOKEN,
     process.env.HUB_POSTGRES_PASSWORD,
     process.env.SONAR_POSTGRES_PASSWORD,
@@ -749,7 +812,7 @@ function sanitizeText(input) {
       return [
         runtimeConfig.sonarToken,
         ...(runtimeConfig.additionalEnv || [])
-          .filter((item) => /(TOKEN|PASSWORD|SECRET|KEY)$/i.test(item.key || ""))
+          .filter((item) => isSensitiveKey(item.key || ""))
           .map((item) => item.value)
       ];
     })
@@ -759,10 +822,13 @@ function sanitizeText(input) {
   }
   output = output
     .replace(/sqp_[A-Za-z0-9]+/g, "[REDACTED_SONAR_TOKEN]")
-    .replace(/(Authorization:\s*Bearer\s+)[^\s]+/gi, "$1[REDACTED]")
+    .replace(/(Authorization:?\s*Bearer\s+)[^\s]+/gi, "$1[REDACTED]")
+    .replace(/(Bearer\s+)[A-Za-z0-9._~-]+/gi, "$1[REDACTED]")
     .replace(/(Using generated security password:\s*)[^\s]+/gi, "$1[REDACTED]")
     .replace(/((?:JWT_SECRET|SIGNING_SECRET|WEBHOOK_SECRET|HMAC_SECRET|SPRING_DATASOURCE_PASSWORD|POSTGRES_PASSWORD|DB_PASSWORD)=)[^\s,]+/gi, "$1[REDACTED]")
-    .replace(/(password|passwd|token|secret)=([^&\s]+)/gi, "$1=[REDACTED]");
+    .replace(/(password|passwd|token|secret|api[_-]?key|credential)=([^&\s]+)/gi, "$1=[REDACTED]")
+    .replace(/([?&](?:password|passwd|token|secret|api[_-]?key|credential)=)[^&\s]+/gi, "$1[REDACTED]")
+    .replace(/:\/\/([^\s/:]+):([^\s/@]+)@/g, "://$1:[REDACTED]@");
   if (projectsRoot) {
     output = output.split(projectsRoot).join("/workspace/projects");
   }
@@ -1612,7 +1678,7 @@ function shouldFingerprintFile(relativePath) {
 function nonSecretEnvFingerprintEntries(project) {
   const env = { ...runtimeDefaultEnv(project), ...projectRuntimeEnv(project) };
   return Object.entries(env)
-    .filter(([key]) => !/(TOKEN|PASSWORD|PASSWD|SECRET|PRIVATE_KEY|API_KEY|ACCESS_KEY)$/i.test(key))
+    .filter(([key]) => !isSensitiveKey(key))
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, value]) => `${key}=${String(value || "")}`);
 }
@@ -1712,25 +1778,46 @@ function shortHash(value) {
 
 function runSmallCommand(command, args, cwd) {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    const safeArgs = command === "git"
+      ? ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper=", ...args]
+      : args;
+    const child = spawn(command, safeArgs, {
+      cwd,
+      env: command === "git"
+        ? { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" }
+        : process.env,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
     let stdout = "";
     let stderr = "";
+    let outputBytes = 0;
+    let forceKillTimer = null;
     const timeout = setTimeout(() => {
       child.kill("SIGTERM");
+      forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 1000);
     }, 3000);
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
+    const consume = (chunk, stream) => {
+      outputBytes += chunk.byteLength;
+      if (outputBytes > Math.min(securityConfig.processOutputLimitBytes, 256 * 1024)) {
+        child.kill("SIGTERM");
+        if (!forceKillTimer) forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 1000);
+        return;
+      }
+      if (stream === "stdout") stdout += chunk.toString();
+      else stderr += chunk.toString();
+    };
+    child.stdout.on("data", (chunk) => consume(chunk, "stdout"));
+    child.stderr.on("data", (chunk) => consume(chunk, "stderr"));
     child.on("close", (code) => {
       clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       resolve({ ok: code === 0, code, stdout: sanitizeText(stdout), stderr: sanitizeText(stderr) });
     });
     child.on("error", (error) => {
       clearTimeout(timeout);
-      resolve({ ok: false, code: -1, stdout, stderr: error.message });
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      resolve({ ok: false, code: -1, stdout: sanitizeText(stdout), stderr: sanitizeText(error.message) });
     });
   });
 }
@@ -3288,6 +3375,7 @@ function resourceUrls(service, ports) {
 }
 
 async function triggerLocalRuntimeAction(project, action) {
+  assertProjectExecutionAllowed(project, securityConfig);
   if (!allowedRuntimeRequestActions.has(action)) {
     throw problem(400, "INVALID_RUNTIME_ACTION", "runtime action must be start, stop, restart, smoke, start-fresh, restart-fresh, rebuild-changed, clean-rebuild or pull-rebuild.");
   }
@@ -3409,6 +3497,7 @@ async function preparePullAndRebuild(project, abs) {
 }
 
 async function deleteRuntimeVolumes(project, body = {}, correlation = correlationId()) {
+  assertProjectExecutionAllowed(project, securityConfig);
   const required = volumeDeletionConfirmation(project);
   if (body.confirmation !== required || body.acknowledgedDataLoss !== true) {
     throw problem(409, "VOLUME_DELETE_CONFIRMATION_REQUIRED", `Volume deletion requires acknowledgedDataLoss=true and confirmation='${required}'.`);
@@ -3585,16 +3674,43 @@ function runRuntimeTargetStreaming(project, target) {
       shell: false,
       stdio: ["ignore", "pipe", "pipe"]
     });
-    child.stdout.on("data", (chunk) => {
-      for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) addRuntimeLog(project, "info", line);
+    let outputBytes = 0;
+    let finished = false;
+    let outputLimitExceeded = false;
+    const timeout = setTimeout(() => {
+      if (finished) return;
+      addRuntimeLog(project, "error", `Runtime operation exceeded ${securityConfig.runtimeTimeoutMs}ms; terminating it.`);
+      child.kill("SIGTERM");
+      setTimeout(() => {
+        if (!finished) child.kill("SIGKILL");
+      }, 5000).unref();
+    }, securityConfig.runtimeTimeoutMs);
+    const consume = (chunk, level) => {
+      outputBytes += chunk.byteLength;
+      if (outputBytes > securityConfig.processOutputLimitBytes && !outputLimitExceeded) {
+        outputLimitExceeded = true;
+        addRuntimeLog(project, "error", "Runtime output exceeded the configured limit; terminating it.");
+        child.kill("SIGTERM");
+        setTimeout(() => {
+          if (!finished) child.kill("SIGKILL");
+        }, 5000).unref();
+        return;
+      }
+      if (outputLimitExceeded) return;
+      for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) addRuntimeLog(project, level, line);
+    };
+    child.stdout.on("data", (chunk) => consume(chunk, "info"));
+    child.stderr.on("data", (chunk) => consume(chunk, "warn"));
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      finished = true;
+      reject(problem(422, "RUNTIME_COMMAND_FAILED", sanitizeText(error.message)));
     });
-    child.stderr.on("data", (chunk) => {
-      for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) addRuntimeLog(project, "warn", line);
-    });
-    child.on("error", (error) => reject(problem(422, "RUNTIME_COMMAND_FAILED", error.message)));
     child.on("close", (code) => {
+      clearTimeout(timeout);
+      finished = true;
       if (code === 0) resolve();
-      else reject(problem(422, "RUNTIME_COMMAND_FAILED", `${target.command} ${target.args.join(" ")} failed with exit code ${code ?? 1}.`));
+      else reject(problem(422, "RUNTIME_COMMAND_FAILED", `Approved runtime operation failed with exit code ${code ?? 1}.`));
     });
   });
 }
@@ -3780,6 +3896,10 @@ function bulkOperationSnapshot(operation) {
 }
 
 async function triggerBulkRuntimeAction(action) {
+  if (!securityConfig.privilegedExecutionEnabled) {
+    throw problem(503, "PRIVILEGED_EXECUTION_DISABLED", "Privileged local execution is disabled for this API instance.");
+  }
+  for (const project of state.projects) assertProjectExecutionAllowed(project, securityConfig);
   if (!allowedRuntimeRequestActions.has(action)) {
     throw problem(400, "INVALID_RUNTIME_ACTION", "bulk runtime action must be start, stop, restart, smoke, start-fresh, restart-fresh, rebuild-changed, clean-rebuild or pull-rebuild.");
   }
@@ -3864,23 +3984,43 @@ function runCommandCapture(command, args, cwd, options = {}) {
     });
     let stdout = "";
     let stderr = "";
+    let outputBytes = 0;
     let finished = false;
+    let forceKillTimer = null;
+    const outputLimitBytes = Number(options.outputLimitBytes || securityConfig.processOutputLimitBytes);
     const timeout = setTimeout(() => {
-      if (!finished) child.kill("SIGTERM");
+      if (!finished) {
+        child.kill("SIGTERM");
+        forceKillTimer = setTimeout(() => {
+          if (!finished) child.kill("SIGKILL");
+        }, 1000);
+      }
     }, options.timeoutMs || 5000);
     child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
+      outputBytes += chunk.byteLength;
+      if (outputBytes <= outputLimitBytes) stdout += chunk.toString();
+      else {
+        child.kill("SIGTERM");
+        if (!forceKillTimer) forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 1000);
+      }
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+      outputBytes += chunk.byteLength;
+      if (outputBytes <= outputLimitBytes) stderr += chunk.toString();
+      else {
+        child.kill("SIGTERM");
+        if (!forceKillTimer) forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 1000);
+      }
     });
     child.on("error", (error) => {
       clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       finished = true;
       resolve({ exitCode: -1, stdout: sanitizeText(stdout), stderr: sanitizeText(error.message || stderr) });
     });
     child.on("close", (code) => {
       clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       finished = true;
       resolve({ exitCode: code ?? 1, stdout: sanitizeText(stdout), stderr: sanitizeText(stderr) });
     });
@@ -3888,6 +4028,7 @@ function runCommandCapture(command, args, cwd, options = {}) {
 }
 
 async function createJob(project, action, requestId, options = {}) {
+  assertProjectExecutionAllowed(project, securityConfig);
   if (!allowedActions.has(action)) {
     throw problem(400, "UNSUPPORTED_ACTION", `Unsupported action '${action}'.`);
   }
@@ -3919,7 +4060,7 @@ async function createJob(project, action, requestId, options = {}) {
       maxConcurrentJobs,
       timeoutSeconds: jobTimeoutSeconds
     },
-    actor: "local-user",
+    actor: currentActor(),
     idempotencyKey: requestId || null,
     branch: git.branch || project.defaultBranch,
     commit: git.commit || null,
@@ -3943,7 +4084,7 @@ function sanitizeExecutionParameters(parameters) {
   for (const [key, value] of Object.entries(parameters || {})) {
     const safeKey = sanitizeText(key).slice(0, 80);
     if (!safeKey) continue;
-    if (/(TOKEN|PASSWORD|PASSWD|SECRET|PRIVATE_KEY|API_KEY|ACCESS_KEY)/i.test(safeKey)) continue;
+    if (isSensitiveKey(safeKey)) continue;
     if (value === null || value === undefined) {
       safe[safeKey] = value;
     } else if (typeof value === "number" || typeof value === "boolean") {
@@ -4237,30 +4378,48 @@ function runRuntimeTargetForJob(job, target) {
       stdio: ["ignore", "pipe", "pipe"]
     });
     const summary = createOutputSummary({ name: target.label, action: "smoke" });
+    let outputBytes = 0;
+    let outputLimitExceeded = false;
+    let finished = false;
+    let forceKillTimer = null;
     const timeout = setTimeout(() => {
+      if (finished) return;
       addLog(job, "error", `Smoke timed out after ${jobTimeoutSeconds}s. Sending SIGTERM.`);
       child.kill("SIGTERM");
+      forceKillTimer = setTimeout(() => {
+        if (!finished) child.kill("SIGKILL");
+      }, 5000);
     }, jobTimeoutSeconds * 1000);
-    child.stdout.on("data", (chunk) => {
+    const consume = (chunk, level) => {
+      outputBytes += chunk.byteLength;
+      if (outputBytes > securityConfig.processOutputLimitBytes && !outputLimitExceeded) {
+        outputLimitExceeded = true;
+        addLog(job, "error", "Smoke output exceeded the configured limit; terminating it.");
+        child.kill("SIGTERM");
+        forceKillTimer = setTimeout(() => {
+          if (!finished) child.kill("SIGKILL");
+        }, 5000);
+        return;
+      }
+      if (outputLimitExceeded) return;
       for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) {
-        recordOutputLine(summary, "info", line);
-        addLog(job, "info", line);
+        recordOutputLine(summary, level, line);
+        addLog(job, level, line);
       }
       publishJob(job);
-    });
-    child.stderr.on("data", (chunk) => {
-      for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) {
-        recordOutputLine(summary, "warn", line);
-        addLog(job, "warn", line);
-      }
-      publishJob(job);
-    });
+    };
+    child.stdout.on("data", (chunk) => consume(chunk, "info"));
+    child.stderr.on("data", (chunk) => consume(chunk, "warn"));
     child.on("error", (error) => {
       clearTimeout(timeout);
-      reject(problem(422, "SMOKE_START_FAILED", error.message));
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      finished = true;
+      reject(problem(422, "SMOKE_START_FAILED", sanitizeText(error.message)));
     });
     child.on("close", (code) => {
       clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      finished = true;
       resolve({ exitCode: code ?? 1, summary: finalizeOutputSummary(summary) });
     });
   });
@@ -4543,36 +4702,50 @@ function runApprovedCommandAttempt(job, stage, cwd, env) {
     });
 
     let finished = false;
+    let outputBytes = 0;
+    let outputLimitExceeded = false;
+    let forceKillTimer = null;
     const timeout = setTimeout(() => {
       if (!finished) {
         addLog(job, "error", `Stage timed out after ${jobTimeoutSeconds}s. Sending SIGTERM.`);
         child.kill("SIGTERM");
+        forceKillTimer = setTimeout(() => {
+          if (!finished) child.kill("SIGKILL");
+        }, 5000);
       }
     }, jobTimeoutSeconds * 1000);
 
     const summary = createOutputSummary(stage);
 
-    child.stdout.on("data", (chunk) => {
+    const consume = (chunk, level) => {
+      outputBytes += chunk.byteLength;
+      if (outputBytes > securityConfig.processOutputLimitBytes && !outputLimitExceeded) {
+        outputLimitExceeded = true;
+        addLog(job, "error", "Stage output exceeded the configured limit; terminating it.");
+        child.kill("SIGTERM");
+        forceKillTimer = setTimeout(() => {
+          if (!finished) child.kill("SIGKILL");
+        }, 5000);
+        return;
+      }
+      if (outputLimitExceeded) return;
       for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) {
-        recordOutputLine(summary, "info", line);
-        addLog(job, "info", line);
+        recordOutputLine(summary, level, line);
+        addLog(job, level, line);
       }
       publishJob(job);
-    });
-    child.stderr.on("data", (chunk) => {
-      for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) {
-        recordOutputLine(summary, "warn", line);
-        addLog(job, "warn", line);
-      }
-      publishJob(job);
-    });
+    };
+    child.stdout.on("data", (chunk) => consume(chunk, "info"));
+    child.stderr.on("data", (chunk) => consume(chunk, "warn"));
     child.on("error", (error) => {
       clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       finished = true;
-      reject(problem(422, "COMMAND_START_FAILED", error.message));
+      reject(problem(422, "COMMAND_START_FAILED", sanitizeText(error.message)));
     });
     child.on("close", (code) => {
       clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       finished = true;
       resolve({ exitCode: code ?? 1, summary: finalizeOutputSummary(summary) });
     });
@@ -4616,6 +4789,8 @@ function runCommandForRepair(command, args, cwd, env, timeoutMs) {
   return new Promise((resolve) => {
     const child = spawn(command, args, { cwd, env, shell: false, stdio: ["ignore", "pipe", "pipe"] });
     const output = [];
+    let outputBytes = 0;
+    let outputLimitExceeded = false;
     let forceKillTimer = null;
     const timeout = setTimeout(() => {
       output.push(`Repair command timed out after ${Math.round(timeoutMs / 1000)}s.`);
@@ -4626,6 +4801,16 @@ function runCommandForRepair(command, args, cwd, env, timeoutMs) {
       }, 5000);
     }, timeoutMs);
     const capture = (chunk) => {
+      outputBytes += chunk.byteLength;
+      if (outputBytes > securityConfig.processOutputLimitBytes) {
+        if (!outputLimitExceeded) {
+          outputLimitExceeded = true;
+          output.push("Repair output exceeded the configured limit; terminating it.");
+          child.kill("SIGTERM");
+          forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 5000);
+        }
+        return;
+      }
       for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) {
         output.push(sanitizeText(line));
       }
@@ -4746,7 +4931,7 @@ function addLog(job, level, message) {
   job.logs.push({
     timestamp: nowIso(),
     level,
-    message: sanitizeText(message)
+    message: sanitizeText(message).slice(0, 4000)
   });
   if (job.logs.length > 2000) job.logs = job.logs.slice(-2000);
 }
@@ -6378,7 +6563,7 @@ function publicTestExecution(job) {
     status: job.status,
     branch: job.branch || "",
     commit: job.commit || "",
-    actor: job.actor || "local-user",
+    actor: job.actor || "system",
     worker: job.worker || null,
     parameters: job.parameters || {},
     guardrails: job.guardrails || {},
@@ -6750,7 +6935,7 @@ async function createDeploymentPlan(project, body = {}, correlation = correlatio
     strategy,
     runtimeAction,
     status,
-    actor: "local-user",
+    actor: currentActor(),
     correlationId: correlation,
     approvalRequestId: "",
     createdAt: nowIso(),
@@ -6806,7 +6991,7 @@ function createApprovalRequest(project, plan, action, reason) {
     action,
     status: "PENDING",
     required: true,
-    requestedBy: "local-user",
+    requestedBy: plan.actor,
     decidedBy: "",
     requestedAt: nowIso(),
     decidedAt: null,
@@ -6837,7 +7022,7 @@ async function decideDeploymentApproval(project, planId, decision, reason = "", 
   if (!approval) throw problem(404, "APPROVAL_NOT_FOUND", "Approval request was not found for this plan.");
   if (approval.status !== "PENDING") throw problem(409, "APPROVAL_ALREADY_DECIDED", "Approval request is already decided.");
   approval.status = decision === "approve" ? "APPROVED" : "REJECTED";
-  approval.decidedBy = "local-user";
+  approval.decidedBy = currentActor();
   approval.decidedAt = nowIso();
   approval.decisionReason = sanitizeText(reason).slice(0, 400);
   plan.updatedAt = nowIso();
@@ -6847,6 +7032,7 @@ async function decideDeploymentApproval(project, planId, decision, reason = "", 
 }
 
 async function applyDeploymentPlan(project, planId, correlation = correlationId()) {
+  assertProjectExecutionAllowed(project, securityConfig);
   const plan = findDeploymentPlanOrThrow(project, planId);
   if (plan.status !== "READY") throw problem(409, "DEPLOYMENT_PLAN_NOT_READY", `Plan is ${plan.status}.`);
   const approval = state.approvalRequests.find((item) => item.id === plan.approvalRequestId && item.projectId === project.id);
@@ -6866,7 +7052,7 @@ async function applyDeploymentPlan(project, planId, correlation = correlationId(
     strategy: plan.strategy,
     runtimeAction: plan.runtimeAction,
     status: "QUEUED",
-    actor: "local-user",
+    actor: currentActor(),
     correlationId: correlation,
     previousDeployment: previousRuntime.lastDeployment ? publicDeploymentSnapshot(previousRuntime.lastDeployment) : null,
     startedAt: nowIso(),
@@ -6988,6 +7174,7 @@ function deploymentVerificationSummary(status, runtime, latestSmoke) {
 }
 
 async function rollbackDeployment(project, body = {}, correlation = correlationId()) {
+  assertProjectExecutionAllowed(project, securityConfig);
   const sourceRecord = body.recordId
     ? findDeploymentRecordOrThrow(project, sanitizeText(body.recordId))
     : state.deploymentRecords.find((item) => item.projectId === project.id && item.operation === "apply" && item.status === "SUCCEEDED") || null;
@@ -7002,7 +7189,7 @@ async function rollbackDeployment(project, body = {}, correlation = correlationI
     strategy: "restart-previous-runtime",
     runtimeAction: "restart",
     status: "BLOCKED",
-    actor: "local-user",
+    actor: currentActor(),
     correlationId: correlation,
     previousDeployment: sourceRecord?.previousDeployment || null,
     startedAt: nowIso(),
@@ -8369,8 +8556,8 @@ function localAgentSecurityPolicy() {
     phase: "Fase 9",
     type: "embedded-local-agent",
     permissions: "minimum-local-workspace-read plus approved runtime actions",
-    workspaceRoot: hostProjectsRoot,
-    secretValues: "never_read_or_returned",
+    workspaceRoot: "/workspace/projects",
+    secretValues: "resolved_only_at_execution_boundary_never_returned",
     arbitraryCommands: "blocked",
     credentialLifetime: "short-lived-required-for-future-remote-agent",
     transport: "loopback-or-docker-network-local",
@@ -8484,8 +8671,8 @@ function publicLocalAgent(agent, heartbeat = null, discovery = null) {
     status,
     connected: status === "CONNECTED",
     deviceId: agent.deviceId,
-    hostRoot: agent.hostRoot,
-    projectsRoot: agent.projectsRoot,
+    hostRoot: "/workspace/projects",
+    projectsRoot: "/workspace/projects",
     registeredAt: agent.registeredAt,
     lastHeartbeatAt: heartbeat?.timestamp || agent.lastHeartbeatAt || localAgentStartedAt,
     heartbeatAgeSeconds: Math.max(0, Math.round((Date.now() - Date.parse(heartbeat?.timestamp || agent.lastHeartbeatAt || localAgentStartedAt)) / 1000)),
@@ -8796,7 +8983,7 @@ function localAgentRequiredVariables(project, discovered = {}) {
   if ((discovered.detectedStack || []).includes("jenkins")) variables.add("JENKINS_URL");
   return [...variables].map((name) => ({
     name,
-    configured: name === "SONAR_TOKEN" ? Boolean(project.runtimeConfig?.sonarToken || process.env.SONAR_TOKEN) : Boolean(process.env[name] || project.runtimeConfig?.[runtimeConfigKeyForVariable(name)]),
+    configured: name === "SONAR_TOKEN" ? Boolean(process.env.SONAR_TOKEN) : Boolean(process.env[name] || project.runtimeConfig?.[runtimeConfigKeyForVariable(name)]),
     value: "[REDACTED]"
   }));
 }
@@ -10824,30 +11011,22 @@ async function sonarFetch(apiPath, project = null) {
 }
 
 async function fetchJson(url, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 5000);
+  const response = await fetchAllowedUpstream(url, options, securityConfig);
+  if (!response.ok) {
+    throw problem(response.status, "UPSTREAM_ERROR", `The configured upstream returned status ${response.status}.`);
+  }
   try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    const text = await response.text();
-    if (!response.ok) {
-      throw problem(response.status, "UPSTREAM_ERROR", `${url} returned ${response.status}: ${text.slice(0, 200)}`);
-    }
-    return text ? JSON.parse(text) : {};
-  } finally {
-    clearTimeout(timeout);
+    return response.text ? JSON.parse(response.text) : {};
+  } catch {
+    throw problem(502, "INVALID_UPSTREAM_RESPONSE", "The configured upstream returned invalid JSON.");
   }
 }
 
 async function fetchText(url, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 3000);
   try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    return { ok: response.ok, status: response.status, text: await response.text() };
+    return await fetchAllowedUpstream(url, options, securityConfig);
   } catch (error) {
-    return { ok: false, status: 0, text: error.message };
-  } finally {
-    clearTimeout(timeout);
+    return { ok: false, status: Number(error.status || 0), text: sanitizeText(error.code || "UPSTREAM_UNAVAILABLE") };
   }
 }
 
@@ -10939,18 +11118,7 @@ function classifyToolLinkStatus(link, result) {
 }
 
 function compactHttpError(result) {
-  const status = result.status ? `HTTP ${result.status}` : "Sin respuesta HTTP";
-  const text = htmlToText(result.text).slice(0, 180);
-  return text ? `${status}: ${text}` : status;
-}
-
-function htmlToText(value) {
-  return sanitizeText(value)
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return result.status ? `HTTP ${result.status}` : "Sin respuesta HTTP";
 }
 
 async function validateSonarProjectLink(project, link) {
@@ -11012,8 +11180,7 @@ function actionableLinkHint(link, details = "") {
   if (link.provider === "observability") {
     return "El servicio de observabilidad no responde desde control-api. Levantar el perfil observability o revisar la red Docker del hub.";
   }
-  const text = typeof details === "object" ? details.text : details;
-  return htmlToText(text).slice(0, 180) || link.hint || "Validacion fallida.";
+  return link.hint || "Validacion fallida; revisar disponibilidad y configuracion del upstream.";
 }
 
 function sleep(ms) {
@@ -11042,8 +11209,8 @@ async function platformStatus() {
   return {
     generatedAt: nowIso(),
     projectsRoot: "/workspace/projects",
-    hostProjectsRoot,
-    hostMirrorConfigured: Boolean(hostProjectsRoot && hostProjectsRoot !== projectsRoot),
+    hostProjectsRoot: "/workspace/projects",
+    hostMirrorConfigured: false,
     services: checks
   };
 }
@@ -11095,19 +11262,6 @@ function platformFindings(platform) {
       targetTab: "",
       source: "platform/status",
       links: service.url ? [{ label: service.name, url: service.url }] : []
-    });
-  }
-  if (!platform.hostMirrorConfigured) {
-    findings.push({
-      severity: "warning",
-      category: "platform",
-      title: "Host mirror no configurado",
-      detail: "El hub no detecta HOST_PROJECTS_ROOT distinto de PROJECTS_ROOT; Docker Desktop puede rechazar bind mounts de rutas internas.",
-      evidence: `projectsRoot=${platform.projectsRoot || ""}`,
-      suggestedAction: "Configurar HOST_PROJECTS_ROOT con la ruta real del host y montar esa carpeta en control-api.",
-      targetTab: "",
-      source: "platform/status",
-      links: []
     });
   }
   return findings;
@@ -11593,7 +11747,9 @@ async function checkJson(name, url, metadata = {}) {
 
 async function checkText(name, url, metadata = {}) {
   const result = await fetchText(url);
-  const details = name === "web" && result.ok ? "Web UI responde." : sanitizeText(result.text).slice(0, 200);
+  const details = result.ok
+    ? (name === "web" ? "Web UI responde." : "Ready endpoint responded.")
+    : (result.status ? `HTTP ${result.status}` : sanitizeText(result.text).slice(0, 80));
   return {
     name,
     status: result.ok ? "UP" : "DOWN",
@@ -12037,8 +12193,20 @@ function problem(status, code, detail) {
 }
 
 async function requestBody(req) {
-  let raw = "";
-  for await (const chunk of req) raw += chunk.toString();
+  const declaredLength = Number(req.headers["content-length"] || 0);
+  if (declaredLength > securityConfig.bodyLimitBytes) {
+    throw problem(413, "PAYLOAD_TOO_LARGE", "Request body exceeds the configured limit.");
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.byteLength;
+    if (size > securityConfig.bodyLimitBytes) {
+      throw problem(413, "PAYLOAD_TOO_LARGE", "Request body exceeds the configured limit.");
+    }
+    chunks.push(Buffer.from(chunk));
+  }
+  const raw = Buffer.concat(chunks, size).toString("utf8");
   if (!raw) return {};
   try {
     return JSON.parse(raw);
@@ -12092,21 +12260,22 @@ function prometheusMetrics() {
 
 function sendProblem(res, req, error) {
   const status = error.status || 500;
+  const headers = { "Content-Type": "application/problem+json; charset=utf-8" };
+  if (error.retryAfterSeconds) headers["Retry-After"] = String(error.retryAfterSeconds);
+  let instance = "/";
+  try {
+    instance = new URL(req.url, "http://localhost").pathname;
+  } catch {
+    instance = "/";
+  }
   send(res, status, {
     type: error.type || "about:blank",
     title: error.code || "INTERNAL_ERROR",
     status,
     detail: sanitizeText(error.message || "Unexpected error."),
-    instance: req.url,
+    instance,
     correlationId: req.correlationId
-  }, { "Content-Type": "application/problem+json; charset=utf-8" });
-}
-
-function withCors(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Idempotency-Key,X-Request-ID");
-  res.setHeader("X-Correlation-ID", req.correlationId);
+  }, headers);
 }
 
 async function serveStatic(req, res, pathname) {
@@ -12134,15 +12303,7 @@ async function serveStatic(req, res, pathname) {
   }
 }
 
-async function route(req, res) {
-  req.correlationId = req.headers["x-request-id"] || correlationId();
-  withCors(req, res);
-  if (req.method === "OPTIONS") {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
+async function handleRoute(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const parts = url.pathname.split("/").filter(Boolean);
 
@@ -12161,6 +12322,21 @@ async function route(req, res) {
     }
     if (parts[0] !== "api" || parts[1] !== "v1") {
       throw problem(404, "API_NOT_FOUND", "API route not found.");
+    }
+
+    if (req.method === "GET" && parts[2] === "security" && parts[3] === "session") {
+      const principal = req.securityPrincipal;
+      send(res, 200, {
+        authentication: securityConfig.authConfigured ? "CONFIGURED" : "READ_ONLY",
+        actor: principal.authenticated ? principal.actor : "anonymous",
+        role: principal.role,
+        authenticated: principal.authenticated,
+        privilegedExecution: securityConfig.privilegedExecutionEnabled ? "ENABLED_LOCAL" : "DISABLED",
+        projectTrust: Object.values(PROJECT_TRUST),
+        bodyLimitBytes: securityConfig.bodyLimitBytes,
+        allowedOrigins: [...securityConfig.allowedOrigins]
+      });
+      return;
     }
 
     if (req.method === "GET" && parts[2] === "platform" && parts[3] === "status") {
@@ -12290,6 +12466,7 @@ async function route(req, res) {
         sonarProjectKey: body.sonarProjectKey || slug,
         defaultBranch: body.defaultBranch || discovered.git?.branch || "main",
         runtimeConfig: normalizeRuntimeConfig(body.runtimeConfig || {}),
+        trust: PROJECT_TRUST.UNTRUSTED,
         status: "ACTIVE",
         createdAt: nowIso(),
         updatedAt: nowIso()
@@ -12327,6 +12504,9 @@ async function route(req, res) {
           const previousRuntimeConfig = JSON.stringify(project.runtimeConfig || {});
           project.runtimeConfig = normalizeRuntimeConfig(body.runtimeConfig, project.runtimeConfig);
           if (previousRuntimeConfig !== JSON.stringify(project.runtimeConfig || {})) shouldClearLinkValidation = true;
+        }
+        if (body.trust !== undefined) {
+          project.trust = normalizeProjectTrust(body.trust);
         }
         if (shouldClearLinkValidation && state.linkValidations) delete state.linkValidations[project.id];
         project.updatedAt = nowIso();
@@ -12594,8 +12774,7 @@ async function route(req, res) {
       }
       if (req.method === "POST" && parts[4] === "cancel") {
         if (["SUCCEEDED", "FAILED", "CANCELLED"].includes(job.status)) {
-          send(res, 409, { message: "Job is already terminal.", job });
-          return;
+          throw problem(409, "JOB_ALREADY_TERMINAL", "The job is already in a terminal state.");
         }
         job.status = "CANCELLED";
         job.finishedAt = nowIso();
@@ -12632,6 +12811,63 @@ async function route(req, res) {
   }
 }
 
+async function route(req, res) {
+  const requestedId = String(req.headers["x-request-id"] || "");
+  req.correlationId = /^[A-Za-z0-9._:-]{1,128}$/.test(requestedId) ? requestedId : correlationId();
+  let corsOrigin = "";
+  let principal = { actor: "anonymous", role: "READ", authenticated: false };
+  try {
+    const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+    corsOrigin = evaluateCors(String(req.headers.origin || ""), securityConfig).origin;
+    applySecurityHeaders(req, res, securityConfig, corsOrigin);
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    const requiredRole = requiredRoleForRequest(req.method, url.pathname);
+    if (requiredRole !== "READ") {
+      const remoteAddress = req.socket?.remoteAddress || "unknown";
+      checkMutationRateLimit(`${remoteAddress}:mutation`);
+    }
+    try {
+      principal = authenticateRequest(req, securityConfig);
+      const protectedRemoteRead = securityConfig.requireAuthForReads
+        && (url.pathname.startsWith("/api/") || url.pathname === "/metrics");
+      authorizeRequest(principal, requiredRole, { requireAuthentication: protectedRemoteRead });
+    } catch (error) {
+      if (state) {
+        await requestContext.run({ principal }, () => appendAudit("security.authorization", url.pathname, "DENIED", {
+          correlationId: req.correlationId,
+          method: req.method,
+          requiredRole,
+          reason: error.code || "AUTHORIZATION_DENIED"
+        }));
+      }
+      throw error;
+    }
+    req.securityPrincipal = principal;
+    await requestContext.run({ principal }, async () => {
+      await handleRoute(req, res);
+      if (requiredRole !== "READ" && state) {
+        await appendAudit("security.request", url.pathname, res.statusCode < 400 ? "SUCCEEDED" : "FAILED", {
+          correlationId: req.correlationId,
+          method: req.method,
+          requiredRole,
+          statusCode: res.statusCode
+        });
+      }
+    });
+  } catch (error) {
+    if (!res.headersSent) {
+      applySecurityHeaders(req, res, securityConfig, corsOrigin);
+      sendProblem(res, req, error);
+    } else {
+      res.end();
+    }
+  }
+}
+
 await ensureDataStore();
 
 const server = http.createServer(route);
@@ -12641,7 +12877,9 @@ server.on("error", (error) => {
 });
 server.listen(port, host, () => {
   console.log(`Quality hub API listening on http://${host}:${port}`);
-  console.log(`PROJECTS_ROOT=${projectsRoot}`);
-  console.log(`HOST_PROJECTS_ROOT=${hostProjectsRoot}`);
+  console.log(`PROJECTS_ROOT=${sanitizeText(projectsRoot)}`);
+  console.log(`HOST_PROJECTS_ROOT=${sanitizeText(hostProjectsRoot)}`);
   console.log(`SONAR_HOST_URL=${sonarHostUrl}`);
+  console.log(`AUTHENTICATION=${securityConfig.authConfigured ? "configured" : "read-only"}`);
+  console.log(`PRIVILEGED_EXECUTION=${securityConfig.privilegedExecutionEnabled ? "enabled-local" : "disabled"}`);
 });

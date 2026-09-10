@@ -7,6 +7,8 @@ cd "$ROOT_DIR"
 npm run check
 
 tmp_dir="$(mktemp -d)"
+projects_root="${PROJECTS_ROOT:-$(dirname "$ROOT_DIR")}"
+auth_token="$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")"
 cleanup() {
   if [ -n "${server_pid:-}" ]; then
     kill "$server_pid" >/dev/null 2>&1 || true
@@ -17,8 +19,12 @@ cleanup() {
 trap cleanup EXIT
 
 HUB_DATA_DIR="$tmp_dir/data" \
-PROJECTS_ROOT="/Users/martiniano/Documents" \
+PROJECTS_ROOT="$projects_root" \
 HUB_API_PORT=18180 \
+HUB_AUTH_TOKEN="$auth_token" \
+HUB_AUTH_ACTOR_ID="smoke-runner" \
+HUB_AUTH_ROLE=ADMIN \
+HUB_PRIVILEGED_EXECUTION_ENABLED=0 \
 node apps/control-api/server.mjs >"$tmp_dir/server.log" 2>&1 &
 server_pid=$!
 
@@ -66,14 +72,15 @@ curl -4 -fsS http://127.0.0.1:18180/api/v1/projects/chedoparti-react-app/testing
 curl -4 -fsS http://127.0.0.1:18180/api/v1/platform/status >/dev/null
 curl -4 -fsS http://127.0.0.1:18180/metrics | grep -q "quality_hub_projects_total"
 
-node --input-type=module <<'NODE'
+HUB_TEST_AUTH_TOKEN="$auth_token" node --input-type=module <<'NODE'
 import assert from "node:assert/strict";
 
 const baseUrl = "http://127.0.0.1:18180";
+const authToken = process.env.HUB_TEST_AUTH_TOKEN;
 async function postJson(path, body, expectedStatus) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
     body: JSON.stringify(body || {})
   });
   const text = await response.text();
@@ -108,8 +115,8 @@ if (plan.status === "READY") {
 const verification = await postJson("/api/v1/projects/chedoparti-react-app/deployments/verify", {}, 200);
 assert.match(verification.status, /^(CONFIGURED_AND_VERIFIED|CONFIGURED_NOT_VERIFIED|PARTIALLY_CONFIGURED|ERROR)$/);
 
-const rollback = await postJson("/api/v1/projects/chedoparti-react-app/deployments/rollback", {}, 202);
-assert.match(rollback.status, /^(QUEUED|BLOCKED)$/);
+const rollback = await postJson("/api/v1/projects/chedoparti-react-app/deployments/rollback", {}, 503);
+assert.equal(rollback.title, "PRIVILEGED_EXECUTION_DISABLED");
 
 const agentHeartbeat = await postJson("/api/v1/agents/heartbeat", { evidence: "smoke heartbeat" }, 200);
 assert.equal(agentHeartbeat.heartbeat.status, "CONNECTED");
@@ -148,8 +155,8 @@ for (const actionName of ["start", "restart", "rebuild-changed", "clean-rebuild"
 const versionChanges = await getJson("/api/v1/projects/chedoparti-react-app/runtime/changes");
 assert.equal(versionChanges.phase, "Fase 11");
 assert.ok(versionChanges.differences.localVsRemote);
-const blockedVolumeDelete = await postJson("/api/v1/projects/chedoparti-react-app/runtime/volumes/delete", {}, 409);
-assert.equal(blockedVolumeDelete.title, "VOLUME_DELETE_CONFIRMATION_REQUIRED");
+const blockedVolumeDelete = await postJson("/api/v1/projects/chedoparti-react-app/runtime/volumes/delete", {}, 503);
+assert.equal(blockedVolumeDelete.title, "PRIVILEGED_EXECUTION_DISABLED");
 
 const platformDocs = await getJson("/api/v1/docs/overview");
 assert.equal(platformDocs.phase, "Fase 12");
@@ -189,6 +196,6 @@ assert.equal(docsSnapshot.report.contract, "living-documentation.v2");
 assert.equal(docsSnapshot.exportPath, "");
 NODE
 
-HUB_TEST_BASE_URL=http://127.0.0.1:18180 node --test tests/*.test.mjs
+HUB_TEST_BASE_URL=http://127.0.0.1:18180 HUB_TEST_AUTH_TOKEN="$auth_token" node --test tests/*.test.mjs
 
 echo "Smoke test passed on http://127.0.0.1:18180"

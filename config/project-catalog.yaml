@@ -14,6 +14,7 @@ projects:
     sonarProjectKey: chedoparti-react-app
     criticality: high
     status: ACTIVE
+    trust: TRUSTED_LOCAL
     components:
       - name: application
         type: application
@@ -37,6 +38,7 @@ projects:
     sonarProjectKey: maria-belen-labarque-ceramic
     criticality: medium
     status: ACTIVE
+    trust: TRUSTED_LOCAL
     components:
       - name: application
         type: application
@@ -60,6 +62,7 @@ projects:
     sonarProjectKey: sistema-dietetica
     criticality: medium
     status: ACTIVE
+    trust: TRUSTED_LOCAL
     components:
       - name: application
         type: application
@@ -83,6 +86,7 @@ projects:
     sonarProjectKey: giftfinder-proyect
     criticality: medium
     status: ACTIVE
+    trust: TRUSTED_LOCAL
     components:
       - name: application
         type: application
@@ -106,6 +110,7 @@ projects:
     sonarProjectKey: panorama-mercados
     criticality: medium
     status: ACTIVE
+    trust: TRUSTED_LOCAL
     components:
       - name: application
         type: application

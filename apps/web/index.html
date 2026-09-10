@@ -257,6 +257,20 @@
             </div>
           </div>
           <div class="config-grid">
+            <article class="security-access-card">
+              <strong>Acceso a operaciones</strong>
+              <span id="securitySessionStatus">Modo lectura</span>
+              <form id="securityTokenForm" class="inline-security-form">
+                <label>
+                  Token Bearer local
+                  <input id="securityTokenInput" type="password" autocomplete="off" placeholder="Se conserva solo durante esta sesion" />
+                </label>
+                <div class="toolbar">
+                  <button class="button primary" type="submit">Usar token</button>
+                  <button class="button secondary" id="clearSecurityToken" type="button">Limpiar</button>
+                </div>
+              </form>
+            </article>
             <article>
               <strong>Workspace permitido</strong>
               <span id="projectsRootLabel">/workspace/projects</span>
@@ -266,8 +280,8 @@
               <span>Las ejecuciones salen de comandos detectados por stack, no de input arbitrario.</span>
             </article>
             <article>
-              <strong>Secretos fuera del navegador</strong>
-              <span>Sonar usa `SONAR_TOKEN` en el backend o en la shell local, nunca en la UI.</span>
+              <strong>Secretos externos</strong>
+              <span>Sonar y las credenciales del backend se resuelven desde variables de entorno, no desde el estado del proyecto.</span>
             </article>
             <article>
               <strong>Estados explicitos</strong>

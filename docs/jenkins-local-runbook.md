@@ -19,17 +19,11 @@ UI:
 http://localhost:18082
 ```
 
-Credenciales default locales:
-
-```text
-admin / admin
-```
-
-Cambiar con `.env`:
+M0 no provee credenciales funcionales por defecto. Antes de activar el perfil, definir externamente:
 
 ```dotenv
-JENKINS_ADMIN_ID=admin
-JENKINS_ADMIN_PASSWORD=una-password-local
+JENKINS_ADMIN_ID=<identidad-local>
+JENKINS_ADMIN_PASSWORD=<secreto-externo>
 JENKINS_URL=http://localhost:18082/
 ```
 
@@ -68,7 +62,7 @@ pipeline {
     stage('Checkout') { steps { checkout scm } }
     stage('Quality') { steps { sh './scripts/quality/quality-check-local.sh || npm run check || true' } }
     stage('Sonar') { steps { sh './scripts/quality/sonar-scan-local.sh' } }
-    stage('Docker image') { steps { sh 'docker compose build' } }
+    // Docker image requiere un runner aislado posterior a M0.
   }
 }
 ```
@@ -77,7 +71,7 @@ Ese ejemplo debe adaptarse al script real de cada repo; no debe commitearse sin 
 
 ## Docker
 
-El servicio Jenkins monta `/var/run/docker.sock` para construir imagenes Docker desde pipelines. Esto da permisos altos sobre Docker Desktop. Es aceptable solo para entorno local controlado y esta documentado como riesgo en `docs/security.md`.
+Desde M0, Jenkins corre non-root, no monta `/var/run/docker.sock`, no monta los proyectos host y no publica el puerto de agentes. Los pipelines que necesiten construir imagenes Docker quedan bloqueados hasta migrar a un runner aislado; no debe reintroducirse el socket como workaround.
 
 ## Desde el dashboard
 

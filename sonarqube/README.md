@@ -17,7 +17,7 @@ cd /Users/martiniano/Documents/dev-tools/sonarqube
 ./scripts/up.sh
 ```
 
-El primer `up` crea `.env` desde `.env.example`. Revisalo si necesitas cambiar puerto o credenciales locales de PostgreSQL.
+El primer `up` crea `.env` con permisos `0600` desde `.env.example` y se detiene hasta que `POSTGRES_PASSWORD` sea provisto externamente.
 
 ## Entrar
 
@@ -27,13 +27,13 @@ URL local:
 http://localhost:9000
 ```
 
-Credenciales iniciales:
+SonarQube upstream puede iniciar con su bootstrap conocido en una instalacion nueva. Completa la rotacion obligatoria antes de crear tokens o analizar proyectos; el servicio solo se publica sobre loopback.
 
 ```text
-admin/admin
+No conservar credenciales de bootstrap.
 ```
 
-SonarQube obliga o recomienda cambiar la contrasena en el primer ingreso.
+Nunca documentar ni versionar la credencial resultante.
 
 ## Crear proyectos
 

@@ -30,7 +30,7 @@ Trigger:
 Pasos:
 
 1. Confirmar `SONAR_HOST_URL`.
-2. Cargar `SONAR_TOKEN` desde la UI de configuracion.
+2. Configurar `SONAR_TOKEN` en el environment externo del backend y reiniciar la API; la UI no acepta ni persiste secretos de herramientas.
 3. Ejecutar tests/coverage si faltan artefactos.
 4. Ejecutar Sonar.
 5. Revisar Quality Gate y Compute Engine.

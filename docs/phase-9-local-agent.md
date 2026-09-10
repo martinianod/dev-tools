@@ -15,7 +15,7 @@ Fase 9 formaliza el agente local embebido en Control API como identidad auditabl
 
 El agente corre como componente embebido del Control API local. Su politica declarada es:
 
-- `secretValues`: `never_read_or_returned`.
+- `secretValues`: `resolved_only_at_execution_boundary_never_returned`.
 - `arbitraryCommands`: `blocked`.
 - Permisos: lectura minima del workspace local y acciones runtime previamente aprobadas.
 - Transporte: loopback o red Docker local.
