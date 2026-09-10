@@ -13,8 +13,7 @@ jenkins:
     loggedInUsersCanDoAnything:
       allowAnonymousRead: false
   crumbIssuer:
-    standard:
-      excludeClientIPFromCrumb: true
+    standard: {}
 
 unclassified:
   location:
