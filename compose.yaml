@@ -123,6 +123,7 @@ services:
   redis:
     image: redis:7.4.1-alpine
     profiles: ["stateful"]
+    user: "999:1000"
     mem_limit: ${HUB_REDIS_MEM_LIMIT:-128m}
     restart: unless-stopped
     read_only: true
