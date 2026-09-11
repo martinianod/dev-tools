@@ -29,6 +29,8 @@ Perfiles especializados:
 - `alerting`: Alertmanager y Blackbox.
 - `observability`: stack completo para diagnostico profundo.
 
+Grafana, Loki, Tempo, OTel y Alertmanager conservan acceso host exclusivamente loopback porque la UI del hub o procesos locales los consumen. Se conectan tambien a `hub-observability-host`, una red no interna acotada al dominio de observabilidad, mientras `hub-observability` sigue siendo interna. Blackbox y cAdvisor son `INTERNAL_ONLY`: Prometheus los consulta por red Docker y no publican puertos al host.
+
 Para apagar servicios pesados sin borrar volumenes:
 
 ```bash
@@ -88,6 +90,10 @@ Usar OTLP hacia Collector:
 Propagacion: W3C Trace Context.
 
 Tempo usa el volumen nombrado `hub_tempo_data`. El servicio `tempo-init` prepara ese volumen antes de arrancar Tempo para evitar fallos de permisos manteniendo el proceso principal sin root.
+
+## Salud de collectors
+
+Blackbox soporta `/-/ready`; Compose usa ese endpoint como healthcheck real. OTel Collector usa una imagen distroless sin shell ni cliente HTTP, por lo que no se agrega un Docker healthcheck que no pueda ejecutarse de forma fiable. La extension oficial `health_check` queda habilitada en `otel-collector:13133` sobre la red interna y se verifica operacionalmente desde un cliente autorizado de esa red. El estado `running` por si solo no se considera prueba de readiness.
 
 ## Alertas locales
 

@@ -17,7 +17,7 @@ cd /Users/martiniano/Documents/dev-tools/sonarqube
 ./scripts/up.sh
 ```
 
-El primer `up` crea `.env` con permisos `0600` desde `.env.example` y se detiene hasta que `POSTGRES_PASSWORD` sea provisto externamente.
+El primer `up` crea `.env` con permisos `0600` desde `.env.example` y se detiene hasta que `POSTGRES_PASSWORD` y `SONAR_ADMIN_PASSWORD` sean provistos externamente. La password administrativa debe diferir del default, tener al menos 12 caracteres e incluir mayuscula, minuscula, numero y caracter especial.
 
 ## Entrar
 
@@ -27,11 +27,9 @@ URL local:
 http://localhost:9000
 ```
 
-SonarQube upstream puede iniciar con su bootstrap conocido en una instalacion nueva. Completa la rotacion obligatoria antes de crear tokens o analizar proyectos; el servicio solo se publica sobre loopback.
+SonarQube upstream puede iniciar con su bootstrap conocido en una instalacion nueva. El servicio one-shot `sonarqube-credential-bootstrap` espera `status=UP`, rota ese acceso con `SONAR_ADMIN_PASSWORD` y verifica que el default deje de funcionar. Si una instalacion existente ya fue rotada, no cambia ni resetea sus credenciales. El healthcheck no pasa mientras el default siga activo y el servicio solo se publica sobre loopback.
 
-```text
-No conservar credenciales de bootstrap.
-```
+No conservar credenciales de bootstrap ni copiar environments de contenedores a logs compartidos.
 
 Nunca documentar ni versionar la credencial resultante.
 

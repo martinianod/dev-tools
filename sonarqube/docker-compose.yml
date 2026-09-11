@@ -2,8 +2,9 @@ name: sonarqube
 
 services:
   sonarqube:
-    image: sonarqube:community
+    image: ${SONARQUBE_IMAGE:-sonarqube:community}
     container_name: local-sonarqube
+    privileged: false
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -21,6 +22,98 @@ services:
       - sonarqube_data:/opt/sonarqube/data
       - sonarqube_extensions:/opt/sonarqube/extensions
       - sonarqube_logs:/opt/sonarqube/logs
+    networks:
+      - sonarqube-net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl --fail --silent --show-error --max-time 5
+          http://127.0.0.1:9000/api/system/status
+          | grep -q '"status":"UP"'
+          && curl --silent --show-error --max-time 5
+          --user admin:admin
+          http://127.0.0.1:9000/api/authentication/validate
+          | grep -q '"valid":false'
+      interval: 20s
+      timeout: 10s
+      retries: 30
+      start_period: 120s
+
+  sonarqube-credential-bootstrap:
+    image: ${SONARQUBE_IMAGE:-sonarqube:community}
+    container_name: local-sonarqube-credential-bootstrap
+    user: "1000:1000"
+    mem_limit: 64m
+    privileged: false
+    restart: "no"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        set +x
+        for attempt in $$(seq 1 90); do
+          if curl --fail --silent --show-error --max-time 5 \
+            http://sonarqube:9000/api/system/status \
+            | grep -q '"status":"UP"'; then
+            break
+          fi
+          if [ "$${attempt}" -eq 90 ]; then
+            echo "SonarQube credential bootstrap timed out waiting for readiness." >&2
+            exit 1
+          fi
+          sleep 5
+        done
+
+        if ! curl --silent --show-error --max-time 5 \
+          --user admin:admin \
+          http://sonarqube:9000/api/authentication/validate \
+          | grep -q '"valid":true'; then
+          echo "SonarQube default administrator credential is already disabled; preserving existing credentials."
+          exit 0
+        fi
+
+        if [ -z "$${SONAR_ADMIN_PASSWORD}" ] \
+          || [ "$${SONAR_ADMIN_PASSWORD}" = "admin" ] \
+          || [ "$${#SONAR_ADMIN_PASSWORD}" -lt 12 ] \
+          || [[ ! "$${SONAR_ADMIN_PASSWORD}" =~ [A-Z] ]] \
+          || [[ ! "$${SONAR_ADMIN_PASSWORD}" =~ [a-z] ]] \
+          || [[ ! "$${SONAR_ADMIN_PASSWORD}" =~ [0-9] ]] \
+          || [[ ! "$${SONAR_ADMIN_PASSWORD}" =~ [^a-zA-Z0-9] ]]; then
+          echo "SONAR_ADMIN_PASSWORD must be supplied externally and satisfy the SonarQube password policy." >&2
+          exit 1
+        fi
+
+        curl --fail --silent --show-error --max-time 10 \
+          --user admin:admin \
+          --request POST \
+          --data-urlencode "login=admin" \
+          --data-urlencode "previousPassword=admin" \
+          --data-urlencode "password=$${SONAR_ADMIN_PASSWORD}" \
+          http://sonarqube:9000/api/users/change_password \
+          >/dev/null
+
+        if curl --silent --show-error --max-time 5 \
+          --user admin:admin \
+          http://sonarqube:9000/api/authentication/validate \
+          | grep -q '"valid":true'; then
+          echo "SonarQube default administrator credential remains active." >&2
+          exit 1
+        fi
+
+        curl --fail --silent --show-error --max-time 5 \
+          --user "admin:$${SONAR_ADMIN_PASSWORD}" \
+          http://sonarqube:9000/api/authentication/validate \
+          | grep -q '"valid":true'
+        echo "SonarQube default administrator credential disabled."
+    environment:
+      SONAR_ADMIN_PASSWORD: ${SONAR_ADMIN_PASSWORD:-}
+    depends_on:
+      sonarqube:
+        condition: service_started
     networks:
       - sonarqube-net
 

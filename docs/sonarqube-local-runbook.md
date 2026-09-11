@@ -27,8 +27,14 @@ PROJECTS_ROOT=/Users/martiniano/Documents
 Si queres levantar el SonarQube incluido en este hub, usa tambien el perfil `quality` y no dejes otro SonarQube ocupando el puerto `9000`:
 
 ```bash
+export SONAR_POSTGRES_PASSWORD=<password-externa>
+export SONAR_ADMIN_PASSWORD=<password-externa-aleatoria-compatible-con-la-policy>
 docker compose --profile core --profile quality --profile observability up -d
 ```
+
+No guardar esos valores en Git ni pasarlos como argumentos visibles. `SONAR_ADMIN_PASSWORD` debe tener al menos 12 caracteres e incluir mayuscula, minuscula, numero y caracter especial. En una instalacion nueva, el servicio one-shot `sonarqube-credential-bootstrap` espera readiness real y rota la credencial bootstrap. Si el volumen ya tiene la credencial default deshabilitada, sale sin cambiar usuarios ni passwords existentes. El healthcheck exige simultaneamente `status=UP` y que la autenticacion default sea invalida; por eso SonarQube permanece unhealthy si el bootstrap falta o falla.
+
+La UI se publica en `127.0.0.1:9000`. `hub-quality` sigue siendo interna para SonarQube y PostgreSQL; `hub-quality-host` se conecta solo a SonarQube para que Docker Desktop materialice el binding loopback.
 
 La observabilidad completa no es requisito para correr Sonar. Usala solo si tambien queres revisar Prometheus/Grafana/Loki/Tempo durante el analisis.
 
@@ -138,6 +144,8 @@ npm run check
 ./scripts/smoke.sh
 docker compose --profile core --profile quality ps
 ```
+
+`sonarqube-credential-bootstrap` debe terminar con exit code 0 y `sonarqube` debe aparecer healthy. Nunca copies su environment o ejecutes `docker inspect` sobre secretos en una salida compartida.
 
 Desde el hub:
 

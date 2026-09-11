@@ -74,18 +74,20 @@ services:
       retries: 12
 
   web:
-    image: nginx:1.27.5-alpine
+    image: nginxinc/nginx-unprivileged:1.27.5-alpine
     profiles: ["core"]
+    user: "101:101"
     mem_limit: ${HUB_WEB_MEM_LIMIT:-128m}
+    privileged: false
     restart: unless-stopped
     read_only: true
+    cap_drop: ["ALL"]
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /var/cache/nginx:rw,noexec,nosuid,size=16m
-      - /var/run:rw,noexec,nosuid,size=2m
+      - /tmp:rw,noexec,nosuid,size=16m
     ports:
-      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${HUB_WEB_PORT:-18000}:80"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${HUB_WEB_PORT:-18000}:8080"
     volumes:
       - ./apps/web:/usr/share/nginx/html:ro
     depends_on:
@@ -94,7 +96,7 @@ services:
     networks:
       - hub-core
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ >/dev/null"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -147,6 +149,7 @@ services:
     image: ${SONARQUBE_IMAGE:-sonarqube:community}
     profiles: ["quality"]
     mem_limit: ${SONARQUBE_MEM_LIMIT:-2g}
+    privileged: false
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -169,11 +172,99 @@ services:
       - hub_sonarqube_logs:/opt/sonarqube/logs
     networks:
       - hub-quality
+      - hub-quality-host
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9000/api/system/status | grep -E 'UP|STARTING' >/dev/null"]
+      test:
+        - CMD-SHELL
+        - >-
+          curl --fail --silent --show-error --max-time 5
+          http://127.0.0.1:9000/api/system/status
+          | grep -q '"status":"UP"'
+          && curl --silent --show-error --max-time 5
+          --user admin:admin
+          http://127.0.0.1:9000/api/authentication/validate
+          | grep -q '"valid":false'
       interval: 20s
       timeout: 10s
       retries: 30
+      start_period: 120s
+
+  sonarqube-credential-bootstrap:
+    image: ${SONARQUBE_IMAGE:-sonarqube:community}
+    profiles: ["quality"]
+    user: "1000:1000"
+    mem_limit: 64m
+    privileged: false
+    restart: "no"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        set +x
+        for attempt in $$(seq 1 90); do
+          if curl --fail --silent --show-error --max-time 5 \
+            http://sonarqube:9000/api/system/status \
+            | grep -q '"status":"UP"'; then
+            break
+          fi
+          if [ "$${attempt}" -eq 90 ]; then
+            echo "SonarQube credential bootstrap timed out waiting for readiness." >&2
+            exit 1
+          fi
+          sleep 5
+        done
+
+        if ! curl --silent --show-error --max-time 5 \
+          --user admin:admin \
+          http://sonarqube:9000/api/authentication/validate \
+          | grep -q '"valid":true'; then
+          echo "SonarQube default administrator credential is already disabled; preserving existing credentials."
+          exit 0
+        fi
+
+        if [ -z "$${SONAR_ADMIN_PASSWORD}" ] \
+          || [ "$${SONAR_ADMIN_PASSWORD}" = "admin" ] \
+          || [ "$${#SONAR_ADMIN_PASSWORD}" -lt 12 ] \
+          || [[ ! "$${SONAR_ADMIN_PASSWORD}" =~ [A-Z] ]] \
+          || [[ ! "$${SONAR_ADMIN_PASSWORD}" =~ [a-z] ]] \
+          || [[ ! "$${SONAR_ADMIN_PASSWORD}" =~ [0-9] ]] \
+          || [[ ! "$${SONAR_ADMIN_PASSWORD}" =~ [^a-zA-Z0-9] ]]; then
+          echo "SONAR_ADMIN_PASSWORD must be supplied externally and satisfy the SonarQube password policy." >&2
+          exit 1
+        fi
+
+        curl --fail --silent --show-error --max-time 10 \
+          --user admin:admin \
+          --request POST \
+          --data-urlencode "login=admin" \
+          --data-urlencode "previousPassword=admin" \
+          --data-urlencode "password=$${SONAR_ADMIN_PASSWORD}" \
+          http://sonarqube:9000/api/users/change_password \
+          >/dev/null
+
+        if curl --silent --show-error --max-time 5 \
+          --user admin:admin \
+          http://sonarqube:9000/api/authentication/validate \
+          | grep -q '"valid":true'; then
+          echo "SonarQube default administrator credential remains active." >&2
+          exit 1
+        fi
+
+        curl --fail --silent --show-error --max-time 5 \
+          --user "admin:$${SONAR_ADMIN_PASSWORD}" \
+          http://sonarqube:9000/api/authentication/validate \
+          | grep -q '"valid":true'
+        echo "SonarQube default administrator credential disabled."
+    environment:
+      SONAR_ADMIN_PASSWORD: ${SONAR_ADMIN_PASSWORD:-}
+    depends_on:
+      sonarqube:
+        condition: service_started
+    networks:
+      - hub-quality
 
   sonar-postgres:
     image: postgres:16.4-alpine
@@ -258,6 +349,7 @@ services:
         condition: service_healthy
     networks:
       - hub-observability
+      - hub-observability-host
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null"]
       interval: 10s
@@ -280,6 +372,7 @@ services:
       - hub_loki_data:/loki
     networks:
       - hub-observability
+      - hub-observability-host
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/ready >/dev/null"]
       interval: 10s
@@ -305,6 +398,7 @@ services:
       - hub_tempo_data:/tmp/tempo
     networks:
       - hub-observability
+      - hub-observability-host
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3200/ready >/dev/null"]
       interval: 10s
@@ -347,6 +441,7 @@ services:
         condition: service_healthy
     networks:
       - hub-observability
+      - hub-observability-host
 
   alertmanager:
     image: prom/alertmanager:v0.27.0
@@ -367,6 +462,7 @@ services:
       - hub_alertmanager_data:/alertmanager
     networks:
       - hub-observability
+      - hub-observability-host
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9093/-/ready >/dev/null"]
       interval: 10s
@@ -383,12 +479,15 @@ services:
     security_opt:
       - no-new-privileges:true
     command: ["--config.file=/etc/blackbox/blackbox.yml"]
-    ports:
-      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${BLACKBOX_PORT:-19115}:9115"
     volumes:
       - ./config/blackbox:/etc/blackbox:ro
     networks:
       - hub-observability
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9115/-/ready >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   jenkins:
     build:
@@ -439,8 +538,6 @@ services:
     cap_drop: ["ALL"]
     security_opt:
       - no-new-privileges:true
-    ports:
-      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${CADVISOR_PORT:-18081}:8080"
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
@@ -471,5 +568,7 @@ networks:
   hub-core:
   hub-quality:
     internal: true
+  hub-quality-host:
   hub-observability:
     internal: true
+  hub-observability-host:
