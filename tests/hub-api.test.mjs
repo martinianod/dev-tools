@@ -92,12 +92,20 @@ test("running hub API exposes project tool links, git, freshness and static UI",
   assert.equal(agents.policy.secretValues, "resolved_only_at_execution_boundary_never_returned");
   assert.equal(agents.policy.arbitraryCommands, "blocked");
   assert.equal(agents.counts.agents, 1);
-  assert.equal(agents.agents[0].status, "CONNECTED");
-  assert.ok(agents.agents[0].capabilities.includes("git_status"));
+  const localAgent = agents.agents[0];
+  assert.ok(localAgent);
+  assert.equal(localAgent.name, "Control API Local Agent");
+  assert.equal(localAgent.type, "embedded");
+  assert.match(localAgent.status, /^(CONNECTED|DISCONNECTED)$/);
+  assert.equal(localAgent.connected, localAgent.status === "CONNECTED");
+  assert.ok(localAgent.capabilities.includes("git_status"));
 
   const heartbeat = await postJson("/api/v1/agents/heartbeat", { evidence: "test heartbeat" }, 200);
   assert.equal(heartbeat.heartbeat.status, "CONNECTED");
   assert.equal(heartbeat.agent.connected, true);
+  const agentsAfterHeartbeat = await fetchJson("/api/v1/agents/overview");
+  assert.equal(agentsAfterHeartbeat.agents[0].status, "CONNECTED");
+  assert.equal(agentsAfterHeartbeat.agents[0].connected, true);
 
   const agentDiscovery = await postJson("/api/v1/agents/discovery/refresh", {}, 200);
   assert.match(agentDiscovery.snapshot.sourceHash, /^sha256:/);

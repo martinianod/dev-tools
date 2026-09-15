@@ -44,7 +44,7 @@ async function waitForApi(baseUrl, child) {
   throw new Error("Security test API did not become ready.");
 }
 
-async function startHub() {
+async function startHub({ heartbeatTtlMs } = {}) {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-tools-m0-"));
   const projectsRoot = path.join(tempRoot, "projects");
   const dataDir = path.join(tempRoot, "data");
@@ -67,7 +67,8 @@ async function startHub() {
       HUB_REQUEST_BODY_LIMIT_BYTES: "1024",
       HUB_PRIVILEGED_EXECUTION_ENABLED: "0",
       HUB_RATE_LIMIT_MAX_MUTATIONS: "1000",
-      HUB_UPSTREAM_TIMEOUT_MS: "100"
+      HUB_UPSTREAM_TIMEOUT_MS: "100",
+      ...(heartbeatTtlMs ? { LOCAL_AGENT_HEARTBEAT_TTL_MS: String(heartbeatTtlMs) } : {})
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -229,6 +230,39 @@ test("M0 security boundary protects the live API hermetically", async (t) => {
     assert.doesNotMatch(text, new RegExp(secret));
     assert.match(text, /SECRET_VALUE_NOT_ACCEPTED/);
   });
+});
+
+test("embedded local agent connectivity follows startup, TTL and heartbeat", async (t) => {
+  const heartbeatTtlMs = 10000;
+  const hub = await startHub({ heartbeatTtlMs });
+  t.after(() => hub.stop());
+
+  const initialResponse = await fetch(`${hub.baseUrl}/api/v1/agents/overview`);
+  assert.equal(initialResponse.status, 200);
+  const initial = await responseJson(initialResponse);
+  assert.equal(initial.agents[0].status, "CONNECTED");
+
+  await new Promise((resolve) => setTimeout(resolve, heartbeatTtlMs + 100));
+  const expiredResponse = await fetch(`${hub.baseUrl}/api/v1/agents/overview`);
+  assert.equal(expiredResponse.status, 200);
+  const expired = await responseJson(expiredResponse);
+  assert.equal(expired.agents[0].status, "DISCONNECTED");
+
+  const heartbeatResponse = await fetch(`${hub.baseUrl}/api/v1/agents/heartbeat`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ evidence: "agent lifecycle test" })
+  });
+  assert.equal(heartbeatResponse.status, 200);
+  const heartbeat = await responseJson(heartbeatResponse);
+  assert.equal(heartbeat.heartbeat.status, "CONNECTED");
+  assert.equal(heartbeat.agent.connected, true);
+
+  const connectedResponse = await fetch(`${hub.baseUrl}/api/v1/agents/overview`);
+  assert.equal(connectedResponse.status, 200);
+  const connected = await responseJson(connectedResponse);
+  assert.equal(connected.agents[0].status, "CONNECTED");
+  assert.equal(connected.agents[0].connected, true);
 });
 
 test("M0 authorization, trust, rate limiting and structured redaction are centralized", () => {
