@@ -74,18 +74,20 @@ services:
       retries: 12
 
   web:
-    image: nginx:1.27.5-alpine
+    image: nginxinc/nginx-unprivileged:1.27.5-alpine
     profiles: ["core"]
+    user: "101:101"
     mem_limit: ${HUB_WEB_MEM_LIMIT:-128m}
+    privileged: false
     restart: unless-stopped
     read_only: true
+    cap_drop: ["ALL"]
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /var/cache/nginx:rw,noexec,nosuid,size=16m
-      - /var/run:rw,noexec,nosuid,size=2m
+      - /tmp:rw,noexec,nosuid,size=16m
     ports:
-      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${HUB_WEB_PORT:-18000}:80"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${HUB_WEB_PORT:-18000}:8080"
     volumes:
       - ./apps/web:/usr/share/nginx/html:ro
     depends_on:
@@ -94,7 +96,7 @@ services:
     networks:
       - hub-core
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ >/dev/null"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -147,14 +149,13 @@ services:
     image: ${SONARQUBE_IMAGE:-sonarqube:community}
     profiles: ["quality"]
     mem_limit: ${SONARQUBE_MEM_LIMIT:-2g}
+    privileged: false
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
     depends_on:
       sonar-postgres:
         condition: service_healthy
-    ports:
-      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${SONARQUBE_PORT:-9000}:9000"
     environment:
       SONAR_JDBC_URL: jdbc:postgresql://sonar-postgres:5432/${SONAR_POSTGRES_DB:-sonarqube}
       SONAR_JDBC_USERNAME: ${SONAR_POSTGRES_USER:-sonar}
@@ -170,10 +171,73 @@ services:
     networks:
       - hub-quality
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9000/api/system/status | grep -E 'UP|STARTING' >/dev/null"]
+      test:
+        - CMD-SHELL
+        - >-
+          curl --fail --silent --show-error --max-time 5
+          http://127.0.0.1:9000/api/system/status
+          | grep -q '"status":"UP"'
+          && curl --silent --show-error --max-time 5
+          --user admin:admin
+          http://127.0.0.1:9000/api/authentication/validate
+          | grep -q '"valid":false'
       interval: 20s
       timeout: 10s
       retries: 30
+      start_period: 120s
+
+  sonarqube-credential-bootstrap:
+    image: ${SONARQUBE_IMAGE:-sonarqube:community}
+    profiles: ["quality"]
+    user: "1000:1000"
+    mem_limit: 64m
+    privileged: false
+    restart: "no"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["/bin/bash", "/opt/sonarqube-bootstrap/bootstrap-credentials.sh"]
+    environment:
+      SONAR_ADMIN_PASSWORD: ${SONAR_ADMIN_PASSWORD:-}
+    volumes:
+      - ./sonarqube/scripts/bootstrap-credentials.sh:/opt/sonarqube-bootstrap/bootstrap-credentials.sh:ro
+    depends_on:
+      sonarqube:
+        condition: service_started
+    networks:
+      - hub-quality
+
+  sonarqube-gateway:
+    image: nginxinc/nginx-unprivileged:1.27.5-alpine
+    profiles: ["quality"]
+    user: "101:101"
+    mem_limit: 128m
+    privileged: false
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    ports:
+      - "127.0.0.1:${SONARQUBE_PORT:-9000}:8080"
+    volumes:
+      - ./sonarqube/config/gateway.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      sonarqube:
+        condition: service_healthy
+      sonarqube-credential-bootstrap:
+        condition: service_completed_successfully
+    networks:
+      - hub-quality
+      - hub-quality-host
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/system/status | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   sonar-postgres:
     image: postgres:16.4-alpine
@@ -258,6 +322,7 @@ services:
         condition: service_healthy
     networks:
       - hub-observability
+      - hub-observability-host
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null"]
       interval: 10s
@@ -280,6 +345,7 @@ services:
       - hub_loki_data:/loki
     networks:
       - hub-observability
+      - hub-observability-host
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/ready >/dev/null"]
       interval: 10s
@@ -305,6 +371,7 @@ services:
       - hub_tempo_data:/tmp/tempo
     networks:
       - hub-observability
+      - hub-observability-host
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3200/ready >/dev/null"]
       interval: 10s
@@ -347,6 +414,7 @@ services:
         condition: service_healthy
     networks:
       - hub-observability
+      - hub-observability-host
 
   alertmanager:
     image: prom/alertmanager:v0.27.0
@@ -367,6 +435,7 @@ services:
       - hub_alertmanager_data:/alertmanager
     networks:
       - hub-observability
+      - hub-observability-host
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9093/-/ready >/dev/null"]
       interval: 10s
@@ -383,12 +452,15 @@ services:
     security_opt:
       - no-new-privileges:true
     command: ["--config.file=/etc/blackbox/blackbox.yml"]
-    ports:
-      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${BLACKBOX_PORT:-19115}:9115"
     volumes:
       - ./config/blackbox:/etc/blackbox:ro
     networks:
       - hub-observability
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9115/-/ready >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   jenkins:
     build:
@@ -402,7 +474,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:rw,noexec,nosuid,size=128m
+      - /tmp:rw,noexec,nosuid,size=1536m
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
@@ -439,8 +511,6 @@ services:
     cap_drop: ["ALL"]
     security_opt:
       - no-new-privileges:true
-    ports:
-      - "${HUB_BIND_ADDRESS:-127.0.0.1}:${CADVISOR_PORT:-18081}:8080"
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
@@ -471,5 +541,7 @@ networks:
   hub-core:
   hub-quality:
     internal: true
+  hub-quality-host:
   hub-observability:
     internal: true
+  hub-observability-host:

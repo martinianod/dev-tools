@@ -44,7 +44,7 @@ async function waitForApi(baseUrl, child) {
   throw new Error("Security test API did not become ready.");
 }
 
-async function startHub() {
+async function startHub({ heartbeatTtlMs } = {}) {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-tools-m0-"));
   const projectsRoot = path.join(tempRoot, "projects");
   const dataDir = path.join(tempRoot, "data");
@@ -67,7 +67,8 @@ async function startHub() {
       HUB_REQUEST_BODY_LIMIT_BYTES: "1024",
       HUB_PRIVILEGED_EXECUTION_ENABLED: "0",
       HUB_RATE_LIMIT_MAX_MUTATIONS: "1000",
-      HUB_UPSTREAM_TIMEOUT_MS: "100"
+      HUB_UPSTREAM_TIMEOUT_MS: "100",
+      ...(heartbeatTtlMs ? { LOCAL_AGENT_HEARTBEAT_TTL_MS: String(heartbeatTtlMs) } : {})
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -231,6 +232,39 @@ test("M0 security boundary protects the live API hermetically", async (t) => {
   });
 });
 
+test("embedded local agent connectivity follows startup, TTL and heartbeat", async (t) => {
+  const heartbeatTtlMs = 10000;
+  const hub = await startHub({ heartbeatTtlMs });
+  t.after(() => hub.stop());
+
+  const initialResponse = await fetch(`${hub.baseUrl}/api/v1/agents/overview`);
+  assert.equal(initialResponse.status, 200);
+  const initial = await responseJson(initialResponse);
+  assert.equal(initial.agents[0].status, "CONNECTED");
+
+  await new Promise((resolve) => setTimeout(resolve, heartbeatTtlMs + 100));
+  const expiredResponse = await fetch(`${hub.baseUrl}/api/v1/agents/overview`);
+  assert.equal(expiredResponse.status, 200);
+  const expired = await responseJson(expiredResponse);
+  assert.equal(expired.agents[0].status, "DISCONNECTED");
+
+  const heartbeatResponse = await fetch(`${hub.baseUrl}/api/v1/agents/heartbeat`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ evidence: "agent lifecycle test" })
+  });
+  assert.equal(heartbeatResponse.status, 200);
+  const heartbeat = await responseJson(heartbeatResponse);
+  assert.equal(heartbeat.heartbeat.status, "CONNECTED");
+  assert.equal(heartbeat.agent.connected, true);
+
+  const connectedResponse = await fetch(`${hub.baseUrl}/api/v1/agents/overview`);
+  assert.equal(connectedResponse.status, 200);
+  const connected = await responseJson(connectedResponse);
+  assert.equal(connected.agents[0].status, "CONNECTED");
+  assert.equal(connected.agents[0].connected, true);
+});
+
 test("M0 authorization, trust, rate limiting and structured redaction are centralized", () => {
   assert.equal(requiredRoleForRequest("GET", "/api/v1/projects"), "READ");
   assert.equal(requiredRoleForRequest("POST", "/api/v1/projects/x/runtime/start"), "OPERATE");
@@ -290,6 +324,7 @@ test("M0 Compose defaults bind locally and remove root-equivalent sockets", asyn
   const compose = await fs.readFile(path.join(repoRoot, "compose.yaml"), "utf8");
   const serverSource = await fs.readFile(path.join(repoRoot, "apps/control-api/server.mjs"), "utf8");
   const sonarCompose = await fs.readFile(path.join(repoRoot, "sonarqube/docker-compose.yml"), "utf8");
+  const sonarBootstrap = await fs.readFile(path.join(repoRoot, "sonarqube/scripts/bootstrap-credentials.sh"), "utf8");
   assert.doesNotMatch(compose, /\/var\/run\/docker\.sock/);
   assert.doesNotMatch(compose, /\/Users\/martiniano/);
   assert.doesNotMatch(compose, /user:\s*["']?0:0/);
@@ -300,8 +335,45 @@ test("M0 Compose defaults bind locally and remove root-equivalent sockets", asyn
   }
   const hubPostgresBlock = compose.split("  hub-postgres:")[1].split("  redis:")[0];
   const redisBlock = compose.split("  redis:")[1].split("  sonarqube:")[0];
+  const webBlock = compose.split("  web:")[1].split("  hub-postgres:")[0];
+  const sonarBlock = compose.split("  sonarqube:")[1].split("  sonarqube-credential-bootstrap:")[0];
+  const sonarBootstrapBlock = compose.split("  sonarqube-credential-bootstrap:")[1].split("  sonarqube-gateway:")[0];
+  const sonarGatewayBlock = compose.split("  sonarqube-gateway:")[1].split("  sonar-postgres:")[0];
+  const standaloneSonarBlock = sonarCompose.split("  sonarqube:")[1].split("  sonarqube-credential-bootstrap:")[0];
+  const standaloneGatewayBlock = sonarCompose.split("  sonarqube-gateway:")[1].split("  sonarqube-db:")[0];
+  const blackboxBlock = compose.split("  blackbox:")[1].split("  jenkins:")[0];
+  const cadvisorBlock = compose.split("  cadvisor:")[1].split("volumes:")[0];
   assert.doesNotMatch(hubPostgresBlock, /\n\s+ports:/);
   assert.doesNotMatch(redisBlock, /\n\s+ports:/);
+  assert.match(webBlock, /nginxinc\/nginx-unprivileged:1\.27\.5-alpine/);
+  assert.match(webBlock, /user:\s*"101:101"/);
+  assert.match(webBlock, /cap_drop:\s*\["ALL"\]/);
+  assert.match(webBlock, /:8080"/);
+  assert.doesNotMatch(sonarBlock, /wget/);
+  assert.doesNotMatch(sonarBlock, /\n\s+ports:/);
+  assert.doesNotMatch(sonarBlock, /hub-quality-host/);
+  assert.match(sonarBlock, /api\/system\/status/);
+  assert.match(sonarBlock, /api\/authentication\/validate/);
+  assert.match(sonarBootstrapBlock, /SONAR_ADMIN_PASSWORD/);
+  assert.match(sonarBootstrapBlock, /bootstrap-credentials\.sh/);
+  assert.match(sonarBootstrap, /api\/users\/change_password/);
+  assert.match(sonarBootstrap, /SONAR_ADMIN_PASSWORD/);
+  assert.match(sonarBootstrap, /api\/authentication\/validate/);
+  assert.match(sonarGatewayBlock, /service_completed_successfully/);
+  assert.match(sonarGatewayBlock, /"127\.0\.0\.1:\$\{SONARQUBE_PORT:-9000\}:8080"/);
+  assert.match(sonarGatewayBlock, /hub-quality-host/);
+  assert.doesNotMatch(blackboxBlock, /\n\s+ports:/);
+  assert.match(blackboxBlock, /9115\/\-\/ready/);
+  assert.doesNotMatch(cadvisorBlock, /\n\s+ports:/);
+  assert.match(compose, /hub-quality-host:\n/);
+  assert.match(compose, /hub-observability-host:\n/);
+  assert.match(compose, /hub-quality:\n\s+internal:\s+true/);
+  assert.match(compose, /hub-observability:\n\s+internal:\s+true/);
   assert.match(serverSource, /HUB_API_HOST \|\| "127\.0\.0\.1"/);
-  assert.match(sonarCompose, /\$\{SONARQUBE_BIND_ADDRESS:-127\.0\.0\.1\}/);
+  assert.match(sonarCompose, /"127\.0\.0\.1:\$\{SONARQUBE_PORT:-9000\}:8080"/);
+  assert.match(sonarCompose, /SONAR_ADMIN_PASSWORD/);
+  assert.doesNotMatch(standaloneSonarBlock, /wget|\n\s+ports:/);
+  assert.match(standaloneGatewayBlock, /service_completed_successfully/);
+  assert.match(standaloneGatewayBlock, /"127\.0\.0\.1:\$\{SONARQUBE_PORT:-9000\}:8080"/);
+  assert.match(sonarCompose, /sonarqube-net:\n\s+name:.*\n\s+internal: true/);
 });

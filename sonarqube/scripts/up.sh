@@ -22,7 +22,18 @@ if [ -z "${POSTGRES_PASSWORD:-}" ]; then
   exit 1
 fi
 
+if [ -z "${SONAR_ADMIN_PASSWORD:-}" ] \
+  || [ "${SONAR_ADMIN_PASSWORD}" = "admin" ] \
+  || [ "${#SONAR_ADMIN_PASSWORD}" -lt 12 ] \
+  || [[ ! "${SONAR_ADMIN_PASSWORD}" =~ [A-Z] ]] \
+  || [[ ! "${SONAR_ADMIN_PASSWORD}" =~ [a-z] ]] \
+  || [[ ! "${SONAR_ADMIN_PASSWORD}" =~ [0-9] ]] \
+  || [[ ! "${SONAR_ADMIN_PASSWORD}" =~ [^a-zA-Z0-9] ]]; then
+  echo "SONAR_ADMIN_PASSWORD must be provided externally and satisfy the SonarQube password policy." >&2
+  exit 1
+fi
+
 docker compose up -d
 
 echo "SonarQube starting at: http://localhost:${SONARQUBE_PORT:-9000}"
-echo "Complete the initial SonarQube credential rotation before using it with projects."
+echo "SonarQube will become healthy only after readiness and default-credential checks pass."

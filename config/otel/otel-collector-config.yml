@@ -6,6 +6,10 @@ receivers:
       http:
         endpoint: 0.0.0.0:4318
 
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
 processors:
   batch: {}
   memory_limiter:
@@ -32,6 +36,7 @@ exporters:
     endpoint: 0.0.0.0:9464
 
 service:
+  extensions: [health_check]
   pipelines:
     traces:
       receivers: [otlp]

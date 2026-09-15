@@ -210,6 +210,8 @@ docker compose --profile core --profile observability --profile quality --profil
 
 Si ya esta corriendo la instalacion existente `sonarqube/` en puerto `9000`, no levantes tambien el perfil `quality` salvo que cambies `SONARQUBE_PORT`.
 
+El perfil `quality` requiere `SONAR_ADMIN_PASSWORD` externa y aleatoria, con al menos 12 caracteres, mayuscula, minuscula, numero y caracter especial. SonarQube arranca solo en la red interna; el bootstrap espera `UP`, invalida `admin/admin` en una instalacion nueva y comprueba que la credencial externa funcione. En instalaciones ya rotadas no la cambia, pero tambien la valida. El gateway de `127.0.0.1:9000` solo arranca despues de que el bootstrap termine correctamente y SonarQube este healthy. Sin secreto, con secreto incorrecto o si falla el bootstrap, no hay endpoint host de una instalacion nueva; revisar `docker compose --profile quality ps -a` y `docker compose --profile quality logs sonarqube-credential-bootstrap` sin mostrar environments ni secretos.
+
 El servicio SonarQube usa `SONARQUBE_IMAGE` y por defecto apunta a `sonarqube:community`, que puede reutilizar una imagen local ya descargada. Para fijar una version concreta, definir por ejemplo `SONARQUBE_IMAGE=sonarqube:26.6-community` en `.env`.
 
 Levantar Jenkins local:
@@ -248,6 +250,8 @@ El rebuild necesita que Docker Desktop pueda resolver Docker Hub (`registry-1.do
 ## Puertos
 
 Todos los puertos publicados usan `HUB_BIND_ADDRESS=127.0.0.1` por defecto. PostgreSQL y Redis no se publican al host; se administran con `docker compose exec`. Un bind no-loopback sin `HUB_AUTH_TOKEN` impide el arranque; si se configura exposición remota explícita, las lecturas de API y métricas también requieren Bearer.
+
+Blackbox y cAdvisor son internos y no publican puertos. Las redes backend de calidad y observabilidad permanecen `internal`; redes host acotadas por dominio permiten materializar solamente los bindings loopback enumerados abajo.
 
 | Servicio | Puerto host |
 | --- | ---: |

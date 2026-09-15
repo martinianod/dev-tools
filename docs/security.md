@@ -14,6 +14,7 @@ Esto no es IAM enterprise ni el aislamiento definitivo del futuro Target Agent. 
 - Todos los puertos administrativos publicados usan el mismo bind loopback.
 - PostgreSQL y Redis no publican puertos al host.
 - `hub-quality` y `hub-observability` son redes Docker internas.
+- `hub-quality-host` y `hub-observability-host` son redes no internas, acotadas por dominio, usadas solamente para que Docker Desktop materialice publicaciones host loopback. No conectan bases de datos ni Redis y no reemplazan las redes backend internas.
 - CORS solo acepta origins exactos de `HUB_ALLOWED_ORIGINS`; no usa wildcard ni refleja origins arbitrarios.
 
 No cambiar `HUB_BIND_ADDRESS` o `HUB_API_HOST` a una interfaz remota sin credenciales, firewall y revision de la frontera de confianza.
@@ -126,25 +127,37 @@ Aplicado segun compatibilidad de imagen:
 - loopback explicito en puertos host;
 - `read_only`, `tmpfs`, `cap_drop: ALL` y `no-new-privileges` donde son compatibles;
 - control-api non-root y sin socket;
+- web sobre nginx unprivileged, UID/GID 101, puerto interno 8080, root filesystem read-only y sin capabilities;
 - Jenkins non-root, sin socket, sin project mount y sin agent port;
+- SonarQube no publica puerto host: arranca solo en `hub-quality`. El bootstrap exige `SONAR_ADMIN_PASSWORD` externa, espera `UP`, invalida `admin/admin` si es una instalacion nueva y valida la credencial externa incluso si la instalacion ya estaba rotada. El gateway loopback solo arranca despues del bootstrap exitoso y de la salud segura de SonarQube;
 - Grafana sin anonymous access ni admin inicial por defecto;
 - PostgreSQL/Redis internos;
 - limites de memoria para core y servicios opcionales.
 
 Credenciales vacias hacen que los perfiles stateful/quality/CI fallen cerrados hasta que el operador las provea externamente.
 
-### Acceso de red por servicio
+### Matriz de exposicion host y redes
 
-| Servicio | Host local | Control plane/containers | Salida externa |
-| --- | --- | --- | --- |
-| control-api | API loopback | `hub-core`, `hub-quality`, `hub-observability` | si, por `hub-core`, para links/configuracion aprobada |
-| web | UI loopback | `hub-core` hacia control-api | no requerida |
-| PostgreSQL / Redis | no publicado | `hub-core` | no requerida |
-| SonarQube / sonar-postgres | Sonar UI loopback; DB no | `hub-quality` interna | no por defecto; plugins requieren una activacion revisada |
-| Prometheus | UI loopback | `hub-observability` y `hub-core` | solo lo necesario para targets accesibles desde core |
-| Grafana / Loki / Tempo / OTel / Alertmanager / Blackbox | puertos loopback cuando aplica | `hub-observability` interna | no por defecto |
-| Jenkins | UI loopback | `hub-core`; sin Docker socket ni project mounts | si, para SCM/dependencias bajo el perfil CI |
-| cAdvisor | UI loopback | `hub-observability` interna | no requerida |
+`hub-quality` y `hub-observability` conservan `internal: true`. Las redes `*-host` no publican por si mismas: solo proporcionan a Docker una ruta no interna para materializar los bindings que Compose fija en `127.0.0.1`.
+
+| Service | Purpose | Container port | Host bind required | Host IP | Host port | Expected network | Result |
+| --- | --- | ---: | --- | --- | ---: | --- | --- |
+| Control API | API local | 18080 | si | `127.0.0.1` | 18080 | `hub-core`, `hub-quality`, `hub-observability` | HOST_LOOPBACK_ADMIN / CROSS_NETWORK_SERVICE |
+| Web | UI local | 8080 | si | `127.0.0.1` | 18000 | `hub-core` | HOST_LOOPBACK_ADMIN |
+| Jenkins | UI CI local | 8080 | si | `127.0.0.1` | 18082 | `hub-core` | HOST_LOOPBACK_ADMIN |
+| SonarQube | aplicacion de calidad | 9000 | no | - | - | `hub-quality` | INTERNAL_ONLY hasta bootstrap seguro |
+| SonarQube gateway | UI y API de calidad | 8080 | si, solo tras bootstrap exitoso | `127.0.0.1` | 9000 | `hub-quality`, `hub-quality-host` | HOST_LOOPBACK_ADMIN |
+| Grafana | UI de observabilidad | 3000 | si | `127.0.0.1` | 13000 | `hub-observability`, `hub-observability-host` | HOST_LOOPBACK_ADMIN |
+| Prometheus | UI y API de metricas | 9090 | si | `127.0.0.1` | 19090 | `hub-observability`, `hub-core` | HOST_LOOPBACK_ADMIN / CROSS_NETWORK_SERVICE |
+| Loki | API local enlazada desde el hub | 3100 | si | `127.0.0.1` | 13100 | `hub-observability`, `hub-observability-host` | HOST_LOOPBACK_ADMIN |
+| Tempo | API local enlazada desde el hub | 3200 | si | `127.0.0.1` | 13200 | `hub-observability`, `hub-observability-host` | HOST_LOOPBACK_ADMIN |
+| OTel Collector | ingreso OTLP desde procesos host | 4317/4318 | si | `127.0.0.1` | 14317/14318 | `hub-observability`, `hub-observability-host` | HOST_LOOPBACK_ADMIN / CROSS_NETWORK_SERVICE |
+| Alertmanager | UI de alertas enlazada desde el hub | 9093 | si | `127.0.0.1` | 19093 | `hub-observability`, `hub-observability-host` | HOST_LOOPBACK_ADMIN |
+| Blackbox | probes solicitados por Prometheus | 9115 | no | - | - | `hub-observability` | INTERNAL_ONLY |
+| cAdvisor | metricas solicitadas por Prometheus | 8080 | no | - | - | `hub-observability` | INTERNAL_ONLY |
+| Hub PostgreSQL | estado interno | 5432 | no | - | - | `hub-core` | INTERNAL_ONLY |
+| Sonar PostgreSQL | estado interno de SonarQube | 5432 | no | - | - | `hub-quality` | INTERNAL_ONLY |
+| Redis | estado interno | 6379 | no | - | - | `hub-core` | INTERNAL_ONLY |
 
 ## SECURITY_EXCEPTIONS
 
@@ -152,7 +165,7 @@ Credenciales vacias hacen que los perfiles stateful/quality/CI fallen cerrados h
 
 - **Riesgo:** cAdvisor conserva mounts read-only de `/`, `/var/run`, `/sys` y Docker data para inventario.
 - **Motivo:** son necesarios para su funcion y no existe aun un collector con interfaz mas estrecha.
-- **Alcance:** perfil opcional `infra/observability`, puerto loopback, root filesystem read-only, sin capabilities y `no-new-privileges`.
+- **Alcance:** perfil opcional `infra/observability`, sin puerto host, root filesystem read-only, sin capabilities y `no-new-privileges`.
 - **Mitigacion temporal:** no activar el perfil en hosts no confiables; preferir metricas del runtime.
 - **Eliminacion:** milestone de observabilidad/runner aislado posterior a M1.
 

@@ -27,8 +27,14 @@ PROJECTS_ROOT=/Users/martiniano/Documents
 Si queres levantar el SonarQube incluido en este hub, usa tambien el perfil `quality` y no dejes otro SonarQube ocupando el puerto `9000`:
 
 ```bash
+export SONAR_POSTGRES_PASSWORD=<password-externa>
+export SONAR_ADMIN_PASSWORD=<password-externa-aleatoria-compatible-con-la-policy>
 docker compose --profile core --profile quality --profile observability up -d
 ```
+
+No guardar esos valores en Git ni pasarlos como argumentos visibles. `SONAR_ADMIN_PASSWORD` debe tener al menos 12 caracteres e incluir mayuscula, minuscula, numero y caracter especial. En una instalacion nueva, el servicio one-shot `sonarqube-credential-bootstrap` espera `UP`, rota la credencial inicial y valida que el acceso externo funcione mientras `admin/admin` deja de funcionar. Si el volumen ya estaba rotado, no cambia la password y valida la proporcionada. Sin secreto o con secreto incorrecto falla; el healthcheck de SonarQube exige `UP` y default invalido, pero **host-ready** requiere ademas bootstrap terminado con exit code 0 y gateway healthy.
+
+La UI se publica en `127.0.0.1:9000` solo a traves de `sonarqube-gateway`. `hub-quality` sigue siendo interna para SonarQube, bootstrap y PostgreSQL; `hub-quality-host` se conecta solo al gateway. Antes del bootstrap exitoso no hay puerto host utilizable, aunque SonarQube ya responda internamente. Para diagnosticar, usar `docker compose --profile quality ps -a` y `docker compose --profile quality logs sonarqube-credential-bootstrap`, nunca un dump de environment o credenciales.
 
 La observabilidad completa no es requisito para correr Sonar. Usala solo si tambien queres revisar Prometheus/Grafana/Loki/Tempo durante el analisis.
 
@@ -137,7 +143,10 @@ cd /Users/martiniano/Documents/dev-tools
 npm run check
 ./scripts/smoke.sh
 docker compose --profile core --profile quality ps
+npm run test:sonarqube-fail-closed
 ```
+
+`sonarqube-credential-bootstrap` debe terminar con exit code 0; `sonarqube` y `sonarqube-gateway` deben aparecer healthy. Nunca copies su environment o ejecutes `docker inspect` sobre secretos en una salida compartida.
 
 Desde el hub:
 

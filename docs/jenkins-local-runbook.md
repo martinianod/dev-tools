@@ -90,6 +90,8 @@ Ese ejemplo debe adaptarse al script real de cada repo; no debe commitearse sin 
 
 Desde M0, Jenkins corre non-root, no monta `/var/run/docker.sock`, no monta los proyectos host y no publica el puerto de agentes. Los pipelines que necesiten construir imagenes Docker quedan bloqueados hasta migrar a un runner aislado; no debe reintroducirse el socket como workaround.
 
+`/tmp` es un tmpfs acotado a 1536 MiB. Jenkins Temporary Space Monitor permanece activo y requiere al menos 1 GiB libre para mantener online el Built-In Node; el limite anterior de 128 MiB lo dejaba offline aun con el volumen de Jenkins disponible. El tamaño del tmpfs es un maximo, no memoria reservada por adelantado. Si el nodo queda offline, comprobar `df -h /tmp` y el motivo en `/computer/api/json` antes de cambiar el monitor o aumentar recursos.
+
 ## Desde el dashboard
 
 En cada proyecto:
