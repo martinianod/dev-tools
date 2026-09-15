@@ -129,7 +129,7 @@ Aplicado segun compatibilidad de imagen:
 - control-api non-root y sin socket;
 - web sobre nginx unprivileged, UID/GID 101, puerto interno 8080, root filesystem read-only y sin capabilities;
 - Jenkins non-root, sin socket, sin project mount y sin agent port;
-- SonarQube no se considera healthy mientras `admin/admin` siga siendo valido; el bootstrap usa una password externa solo en instalaciones nuevas y nunca resetea una instalacion ya rotada;
+- SonarQube no publica puerto host: arranca solo en `hub-quality`. El bootstrap exige `SONAR_ADMIN_PASSWORD` externa, espera `UP`, invalida `admin/admin` si es una instalacion nueva y valida la credencial externa incluso si la instalacion ya estaba rotada. El gateway loopback solo arranca despues del bootstrap exitoso y de la salud segura de SonarQube;
 - Grafana sin anonymous access ni admin inicial por defecto;
 - PostgreSQL/Redis internos;
 - limites de memoria para core y servicios opcionales.
@@ -145,7 +145,8 @@ Credenciales vacias hacen que los perfiles stateful/quality/CI fallen cerrados h
 | Control API | API local | 18080 | si | `127.0.0.1` | 18080 | `hub-core`, `hub-quality`, `hub-observability` | HOST_LOOPBACK_ADMIN / CROSS_NETWORK_SERVICE |
 | Web | UI local | 8080 | si | `127.0.0.1` | 18000 | `hub-core` | HOST_LOOPBACK_ADMIN |
 | Jenkins | UI CI local | 8080 | si | `127.0.0.1` | 18082 | `hub-core` | HOST_LOOPBACK_ADMIN |
-| SonarQube | UI y API de calidad | 9000 | si | `127.0.0.1` | 9000 | `hub-quality`, `hub-quality-host` | HOST_LOOPBACK_ADMIN |
+| SonarQube | aplicacion de calidad | 9000 | no | - | - | `hub-quality` | INTERNAL_ONLY hasta bootstrap seguro |
+| SonarQube gateway | UI y API de calidad | 8080 | si, solo tras bootstrap exitoso | `127.0.0.1` | 9000 | `hub-quality`, `hub-quality-host` | HOST_LOOPBACK_ADMIN |
 | Grafana | UI de observabilidad | 3000 | si | `127.0.0.1` | 13000 | `hub-observability`, `hub-observability-host` | HOST_LOOPBACK_ADMIN |
 | Prometheus | UI y API de metricas | 9090 | si | `127.0.0.1` | 19090 | `hub-observability`, `hub-core` | HOST_LOOPBACK_ADMIN / CROSS_NETWORK_SERVICE |
 | Loki | API local enlazada desde el hub | 3100 | si | `127.0.0.1` | 13100 | `hub-observability`, `hub-observability-host` | HOST_LOOPBACK_ADMIN |

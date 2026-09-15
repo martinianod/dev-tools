@@ -27,7 +27,9 @@ URL local:
 http://localhost:9000
 ```
 
-SonarQube upstream puede iniciar con su bootstrap conocido en una instalacion nueva. El servicio one-shot `sonarqube-credential-bootstrap` espera `status=UP`, rota ese acceso con `SONAR_ADMIN_PASSWORD` y verifica que el default deje de funcionar. Si una instalacion existente ya fue rotada, no cambia ni resetea sus credenciales. El healthcheck no pasa mientras el default siga activo y el servicio solo se publica sobre loopback.
+SonarQube upstream puede iniciar internamente con su bootstrap conocido en una instalacion nueva, pero **no publica puerto host**. El servicio one-shot `sonarqube-credential-bootstrap` exige `SONAR_ADMIN_PASSWORD`, espera `status=UP`, rota el acceso inicial, verifica que `admin/admin` sea invalido y que la credencial externa funcione. Si una instalacion existente ya fue rotada, no cambia ni resetea la password, pero valida la credencial externa suministrada. Solo despues de ese exit code 0 y de un healthcheck seguro arranca `sonarqube-gateway`, que publica `127.0.0.1:9000`. Si falta el secreto, es incorrecto o falla la rotacion, el gateway no arranca en una instalacion nueva: la aplicacion puede estar `UP` internamente, pero no esta host-ready.
+
+Para diagnosticar sin revelar secretos, usar `docker compose ps -a` y `docker compose logs sonarqube-credential-bootstrap`. No compartir `docker inspect`, `docker compose config` sin `--quiet` ni variables de entorno de esos contenedores.
 
 No conservar credenciales de bootstrap ni copiar environments de contenedores a logs compartidos.
 

@@ -3,7 +3,7 @@ name: sonarqube
 services:
   sonarqube:
     image: ${SONARQUBE_IMAGE:-sonarqube:community}
-    container_name: local-sonarqube
+    container_name: ${SONARQUBE_CONTAINER_NAME:-local-sonarqube}
     privileged: false
     restart: unless-stopped
     security_opt:
@@ -11,8 +11,6 @@ services:
     depends_on:
       sonarqube-db:
         condition: service_healthy
-    ports:
-      - "${SONARQUBE_BIND_ADDRESS:-127.0.0.1}:${SONARQUBE_PORT:-9000}:9000"
     environment:
       SONAR_JDBC_URL: jdbc:postgresql://sonarqube-db:5432/${POSTGRES_DB:-sonarqube}
       SONAR_JDBC_USERNAME: ${POSTGRES_USER:-sonar}
@@ -42,7 +40,7 @@ services:
 
   sonarqube-credential-bootstrap:
     image: ${SONARQUBE_IMAGE:-sonarqube:community}
-    container_name: local-sonarqube-credential-bootstrap
+    container_name: ${SONARQUBE_BOOTSTRAP_CONTAINER_NAME:-local-sonarqube-credential-bootstrap}
     user: "1000:1000"
     mem_limit: 64m
     privileged: false
@@ -51,75 +49,51 @@ services:
     cap_drop: ["ALL"]
     security_opt:
       - no-new-privileges:true
-    entrypoint: ["/bin/bash", "-ec"]
-    command:
-      - |
-        set +x
-        for attempt in $$(seq 1 90); do
-          if curl --fail --silent --show-error --max-time 5 \
-            http://sonarqube:9000/api/system/status \
-            | grep -q '"status":"UP"'; then
-            break
-          fi
-          if [ "$${attempt}" -eq 90 ]; then
-            echo "SonarQube credential bootstrap timed out waiting for readiness." >&2
-            exit 1
-          fi
-          sleep 5
-        done
-
-        if ! curl --silent --show-error --max-time 5 \
-          --user admin:admin \
-          http://sonarqube:9000/api/authentication/validate \
-          | grep -q '"valid":true'; then
-          echo "SonarQube default administrator credential is already disabled; preserving existing credentials."
-          exit 0
-        fi
-
-        if [ -z "$${SONAR_ADMIN_PASSWORD}" ] \
-          || [ "$${SONAR_ADMIN_PASSWORD}" = "admin" ] \
-          || [ "$${#SONAR_ADMIN_PASSWORD}" -lt 12 ] \
-          || [[ ! "$${SONAR_ADMIN_PASSWORD}" =~ [A-Z] ]] \
-          || [[ ! "$${SONAR_ADMIN_PASSWORD}" =~ [a-z] ]] \
-          || [[ ! "$${SONAR_ADMIN_PASSWORD}" =~ [0-9] ]] \
-          || [[ ! "$${SONAR_ADMIN_PASSWORD}" =~ [^a-zA-Z0-9] ]]; then
-          echo "SONAR_ADMIN_PASSWORD must be supplied externally and satisfy the SonarQube password policy." >&2
-          exit 1
-        fi
-
-        curl --fail --silent --show-error --max-time 10 \
-          --user admin:admin \
-          --request POST \
-          --data-urlencode "login=admin" \
-          --data-urlencode "previousPassword=admin" \
-          --data-urlencode "password=$${SONAR_ADMIN_PASSWORD}" \
-          http://sonarqube:9000/api/users/change_password \
-          >/dev/null
-
-        if curl --silent --show-error --max-time 5 \
-          --user admin:admin \
-          http://sonarqube:9000/api/authentication/validate \
-          | grep -q '"valid":true'; then
-          echo "SonarQube default administrator credential remains active." >&2
-          exit 1
-        fi
-
-        curl --fail --silent --show-error --max-time 5 \
-          --user "admin:$${SONAR_ADMIN_PASSWORD}" \
-          http://sonarqube:9000/api/authentication/validate \
-          | grep -q '"valid":true'
-        echo "SonarQube default administrator credential disabled."
+    entrypoint: ["/bin/bash", "/opt/sonarqube-bootstrap/bootstrap-credentials.sh"]
     environment:
       SONAR_ADMIN_PASSWORD: ${SONAR_ADMIN_PASSWORD:-}
+    volumes:
+      - ./scripts/bootstrap-credentials.sh:/opt/sonarqube-bootstrap/bootstrap-credentials.sh:ro
     depends_on:
       sonarqube:
         condition: service_started
     networks:
       - sonarqube-net
 
+  sonarqube-gateway:
+    image: nginxinc/nginx-unprivileged:1.27.5-alpine
+    container_name: ${SONARQUBE_GATEWAY_CONTAINER_NAME:-local-sonarqube-gateway}
+    user: "101:101"
+    mem_limit: 128m
+    privileged: false
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    ports:
+      - "127.0.0.1:${SONARQUBE_PORT:-9000}:8080"
+    volumes:
+      - ./config/gateway.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      sonarqube:
+        condition: service_healthy
+      sonarqube-credential-bootstrap:
+        condition: service_completed_successfully
+    networks:
+      - sonarqube-net
+      - sonarqube-host
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/system/status | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
   sonarqube-db:
     image: postgres:16-alpine
-    container_name: local-sonarqube-db
+    container_name: ${SONARQUBE_DB_CONTAINER_NAME:-local-sonarqube-db}
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -139,14 +113,17 @@ services:
 
 volumes:
   sonarqube_data:
-    name: local_sonarqube_data
+    name: ${SONARQUBE_DATA_VOLUME:-local_sonarqube_data}
   sonarqube_extensions:
-    name: local_sonarqube_extensions
+    name: ${SONARQUBE_EXTENSIONS_VOLUME:-local_sonarqube_extensions}
   sonarqube_logs:
-    name: local_sonarqube_logs
+    name: ${SONARQUBE_LOGS_VOLUME:-local_sonarqube_logs}
   sonarqube_db_data:
-    name: local_sonarqube_db_data
+    name: ${SONARQUBE_DB_VOLUME:-local_sonarqube_db_data}
 
 networks:
   sonarqube-net:
-    name: local-sonarqube-net
+    name: ${SONARQUBE_INTERNAL_NETWORK:-local-sonarqube-net}
+    internal: true
+  sonarqube-host:
+    name: ${SONARQUBE_HOST_NETWORK:-local-sonarqube-host}
